@@ -1,6 +1,6 @@
 ############################################################################
 #
-#   Copyright (c) 2015 PX4 Development Team. All rights reserved.
+#   Copyright (c) 2015-2019 PX4 Development Team. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -31,82 +31,26 @@
 #
 ############################################################################
 
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
+# required by other mixers
+add_subdirectory(MixerBase)
 
-set(geometry_files
-	quad_x.toml
-	quad_h.toml
-	quad_plus.toml
-	quad_wide.toml
-	quad_deadcat.toml
-	quad_vtail.toml
-	quad_s250aq.toml
-	quad_y.toml
-	quad_x_pusher.toml
-	hex_x.toml
-	hex_plus.toml
-	hex_cox.toml
-	hex_t.toml
-	octa_x.toml
-	octa_plus.toml
-	octa_cox.toml
-	octa_cox_wide.toml
-	twin_engine.toml
-	tri_y.toml
-	dodeca_top_cox.toml
-	dodeca_bottom_cox.toml
+add_subdirectory(HelicopterMixer)
+add_subdirectory(MultirotorMixer)
+add_subdirectory(NullMixer)
+add_subdirectory(SimpleMixer)
+
+add_library(mixer
+	MixerGroup.cpp
+	MixerGroup.hpp
+	load_mixer_file.cpp
+	mixer_load.h
 )
 
-set(geometries_list)
-foreach(geom_file ${geometry_files})
-	list(APPEND geometries_list ${CMAKE_CURRENT_SOURCE_DIR}/geometries/${geom_file})
-endforeach()
-
-add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor.generated.h
-	COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py -f ${geometries_list} -o ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor.generated.h
-	DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py ${geometries_list}
+target_link_libraries(mixer
+	PRIVATE
+		HelicopterMixer
+		MultirotorMixer
+		NullMixer
+		SimpleMixer
 	)
-add_custom_target(mixer_gen
-	DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor.generated.h
-	DEPENDS ${geometries_list})
-
-add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_normalized.generated.h
-	COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py --normalize -f ${geometries_list} -o ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_normalized.generated.h
-	DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py ${geometries_list}
-	)
-add_custom_target(mixer_gen_norm
-	DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_normalized.generated.h
-	DEPENDS ${geometries_list})
-
-add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_6dof.generated.h
-	COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py --sixdof -f ${geometries_list} -o ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_6dof.generated.h
-	DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/geometries/tools/px_generate_mixers.py ${geometries_list}
-	)
-add_custom_target(mixer_gen_6dof
-	DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_6dof.generated.h
-	DEPENDS ${geometries_list})
-
-add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_legacy.generated.h
-	COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/multi_tables.py > ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_legacy.generated.h
-	DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/multi_tables.py
-	)
-add_custom_target(mixer_gen_legacy
-	DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mixer_multirotor_legacy.generated.h)
-
-px4_add_module(
-	MODULE lib__mixer
-	SRCS
-		mixer.cpp
-		mixer_group.cpp
-		mixer_helicopter.cpp
-		mixer_load.c
-		mixer_multirotor.cpp
-		mixer_simple.cpp
-	DEPENDS
-		platforms__common
-		mixer_gen
-		mixer_gen_norm
-		mixer_gen_6dof
-		mixer_gen_legacy
-	)
-# vim: set noet ft=cmake fenc=utf-8 ff=unix :
+add_dependencies(mixer prebuild_targets)
