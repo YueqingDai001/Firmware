@@ -53,6 +53,16 @@
  * @value 63 Six side calibration
  * @group Sensors
  */
+PARAM_DEFINE_INT32(SENS_MAG_SIDES, 63);
+
+/**
+ * For legacy QGC support only
+ *
+ * Use SENS_MAG_SIDES instead
+ *
+ * @group Sensors
+ * @category Developer
+ */
 PARAM_DEFINE_INT32(CAL_MAG_SIDES, 63);
 
 /**
@@ -76,13 +86,13 @@ PARAM_DEFINE_INT32(CAL_MAG_COMP_TYP, 0);
  * @boolean
  * @group Sensors
  */
-PARAM_DEFINE_INT32(CAL_MAG_ROT_AUTO, 1);
+PARAM_DEFINE_INT32(SENS_MAG_AUTOROT, 1);
 
 /**
  * Magnetometer max rate.
  *
  * Magnetometer data maximum publication rate. This is an upper bound,
- * actual magnetometer data rate is still dependant on the sensor.
+ * actual magnetometer data rate is still dependent on the sensor.
  *
  * @min 1
  * @max 200
@@ -92,7 +102,7 @@ PARAM_DEFINE_INT32(CAL_MAG_ROT_AUTO, 1);
  * @reboot_required true
  *
  */
-PARAM_DEFINE_FLOAT(SENS_MAG_RATE, 50.0f);
+PARAM_DEFINE_FLOAT(SENS_MAG_RATE, 15.0f);
 
 /**
  * Sensors hub mag mode
@@ -105,3 +115,15 @@ PARAM_DEFINE_FLOAT(SENS_MAG_RATE, 50.0f);
  * @group Sensors
  */
 PARAM_DEFINE_INT32(SENS_MAG_MODE, 1);
+
+/**
+ * Magnetometer auto calibration
+ *
+ * Automatically initialize magnetometer calibration from bias estimate if available.
+ *
+ * @boolean
+ *
+ * @category system
+ * @group Sensors
+ */
+PARAM_DEFINE_INT32(SENS_MAG_AUTOCAL, 1);

@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2016 PX4 Development Team. All rights reserved.
+ * Copyright (C) 2022 ModalAI, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,13 +31,6 @@
  *
  ****************************************************************************/
 
-/**
- * @file qshell.cpp
- * Send shell commands to qurt
- *
- * @author Nicolas de Palezieux <ndepal@gmail.com>
- */
-
 #include <px4_platform_common/log.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -49,10 +42,24 @@
 
 #include "qshell.h"
 
+#define QSHELL_RESPONSE_WAIT_TIME_US (20 * 1000000) // 20 sec, for temporary ESC calibration
+
+// Static variables
 px4::AppState QShell::appState;
+uint32_t QShell::_current_sequence{0};
+uORB::Subscription *QShell::_qshell_retval_sub{nullptr};
+
 
 int QShell::main(std::vector<std::string> argList)
 {
+	if (_qshell_retval_sub == nullptr) {
+		_qshell_retval_sub = new uORB::Subscription(ORB_ID(qshell_retval));
+
+		if (_qshell_retval_sub == nullptr) {
+			PX4_ERR("Couldn't initialilze Qshell response subscription");
+		}
+	}
+
 	int ret = _send_cmd(argList);
 
 	if (ret != 0) {
@@ -63,7 +70,7 @@ int QShell::main(std::vector<std::string> argList)
 	ret = _wait_for_retval();
 
 	if (ret != 0) {
-		PX4_ERR("Could not get return value");
+		PX4_ERR("Command failed");
 		return -1;
 	}
 
@@ -98,8 +105,8 @@ int QShell::_send_cmd(std::vector<std::string> &argList)
 	qshell_req.strlen = cmd.size();
 	strcpy((char *)qshell_req.cmd, cmd.c_str());
 	qshell_req.request_sequence = _current_sequence;
-
 	qshell_req.timestamp = hrt_absolute_time();
+
 	_qshell_req_pub.publish(qshell_req);
 
 	return 0;
@@ -108,20 +115,22 @@ int QShell::_send_cmd(std::vector<std::string> &argList)
 int QShell::_wait_for_retval()
 {
 	const hrt_abstime time_started_us = hrt_absolute_time();
+	qshell_retval_s retval;
+	memset(&retval, 0, sizeof(qshell_retval_s));
 
-	while (hrt_elapsed_time(&time_started_us) < 3000000) {
-		qshell_retval_s retval;
-
-		if (_qshell_retval_sub.update(&retval)) {
+	while (hrt_elapsed_time(&time_started_us) < QSHELL_RESPONSE_WAIT_TIME_US) {
+		if (_qshell_retval_sub->update(&retval)) {
 			if (retval.return_sequence != _current_sequence) {
 				PX4_WARN("Ignoring return value with wrong sequence");
 
 			} else {
 				if (retval.return_value) {
-					PX4_WARN("cmd returned with: %d", retval.return_value);
+					PX4_INFO("cmd returned with: %d", retval.return_value);
 				}
 
-				return 0;
+				PX4_INFO("qshell return value timestamp: %lu, local time: %lu", retval.timestamp, hrt_absolute_time());
+
+				return retval.return_value;
 			}
 		}
 

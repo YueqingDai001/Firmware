@@ -61,6 +61,8 @@ def main():
                         help="Board architecture for this run")
     args = parser.parse_args()
 
+    err_count = 0
+
     # go through temp folder
     for (root, dirs, files) in os.walk(args.folder):
         for file in files:
@@ -83,29 +85,30 @@ def main():
 
             # only prune text files
             if ".zip" in file or ".bin" in file or ".swp" in file \
-                    or ".gz" in file or ".bz2" in file \
+                    or ".gz" in file or ".xz" in file or ".bz2" in file \
                     or ".data" in file or ".DS_Store" in file:
                 continue
 
             # read file line by line
             pruned_content = ""
             board_excluded = False
+
             with io.open(file_path, "r", newline=None) as f:
                 for line in f:
+                    # abort if spurious tabs are found
+                    if re.search(r"[a-zA-Z0-9]+\t.+", line):
+                        file_local = re.sub(args.folder, '', file_path)
+                        print("ERROR: Spurious TAB character in file " + file_local)
+                        print("Line: " + line)
+                        err_count += 1
+
+                    # find excluded boards
                     if re.search(r'\b{0} exclude\b'.format(args.board), line):
                         board_excluded = True
-                    # handle mixer files differently than startup files
-                    if file_path.endswith(".mix"):
-                        if line.startswith(("Z:", "M:", "R: ", "O:", "S:",
-                                            "H:", "T:", "P:")):
-                            # reduce multiple consecutive spaces into a
-                            # single space
-                            line_reduced = re.sub(' +', ' ', line)
-                            pruned_content += line_reduced
-                    else:
-                        if not line.isspace() \
-                                and not line.strip().startswith("#"):
-                            pruned_content += line.strip() + "\n"
+
+                    if not line.isspace() \
+                            and not line.strip().startswith("#"):
+                        pruned_content += line.strip() + "\n"
             # delete the file if it doesn't contain the architecture
             # write out the pruned content else
             if not board_excluded:
@@ -115,6 +118,9 @@ def main():
                     f.write(pruned_content.encode("ascii", errors='strict'))
             else:
                 os.remove(file_path)
+
+    if (err_count > 0):
+        exit(1)
 
 
 if __name__ == '__main__':

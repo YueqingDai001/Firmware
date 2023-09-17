@@ -250,6 +250,12 @@
 
 #define STM32_RCC_D3CCIPR_ADCSEL     RCC_D3CCIPR_ADCSEL_PLL2
 
+/* FDCAN 1 2 clock source */
+
+#define STM32_RCC_D2CCIP1R_FDCANSEL  RCC_D2CCIP1R_FDCANSEL_HSE   /* FDCAN 1 2 clock source */
+
+#define STM32_FDCANCLK               STM32_HSE_FREQUENCY
+
 /* FLASH wait states
  *
  *  ------------ ---------- -----------
@@ -382,7 +388,7 @@
 #define GPIO_UART7_RX    GPIO_UART7_RX_4    /* PF6  */
 #define GPIO_UART7_TX    GPIO_UART7_TX_3    /* PE8  */
 #define GPIO_UART7_RTS   GPIO_UART7_RTS_2   /* PF8  */
-#define GPIO_UART7_CTS   GPIO_UART7_CTS_1   /* PE10 */
+#define GPIO_UART7_CTS   (GPIO_UART7_CTS_1 | GPIO_PULLDOWN)   /* PE10 */
 
 #define GPIO_UART8_RX    GPIO_UART8_RX_1    /* PE0 */
 #define GPIO_UART8_TX    GPIO_UART8_TX_1    /* PE1 */

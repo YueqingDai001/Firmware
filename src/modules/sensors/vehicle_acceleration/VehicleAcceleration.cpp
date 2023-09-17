@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2019 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2019-2022 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -38,7 +38,6 @@
 #include <uORB/topics/vehicle_imu_status.h>
 
 using namespace matrix;
-using namespace time_literals;
 
 namespace sensors
 {
@@ -47,6 +46,8 @@ VehicleAcceleration::VehicleAcceleration() :
 	ModuleParams(nullptr),
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers)
 {
+	_vehicle_acceleration_pub.advertise();
+
 	CheckAndUpdateFilters();
 }
 
@@ -62,7 +63,7 @@ bool VehicleAcceleration::Start()
 
 	// sensor_selection needed to change the active sensor if the primary stops updating
 	if (!_sensor_selection_sub.registerCallback()) {
-		PX4_ERR("sensor_selection callback registration failed");
+		PX4_ERR("callback registration failed");
 		return false;
 	}
 
@@ -92,10 +93,12 @@ void VehicleAcceleration::CheckAndUpdateFilters()
 
 		const float sample_rate_hz = imu_status.get().accel_rate_hz;
 
-		if ((imu_status.get().accel_device_id != 0) && (imu_status.get().accel_device_id == _calibration.device_id())
+		if (imu_status.advertised() && (imu_status.get().timestamp != 0)
+		    && (imu_status.get().accel_device_id != 0) && (imu_status.get().accel_device_id == _calibration.device_id())
 		    && PX4_ISFINITE(sample_rate_hz) && (sample_rate_hz > 0)) {
+
 			// check if sample rate error is greater than 1%
-			if ((fabsf(sample_rate_hz - _filter_sample_rate) / _filter_sample_rate) > 0.01f) {
+			if (!PX4_ISFINITE(_filter_sample_rate) || (fabsf(sample_rate_hz - _filter_sample_rate) / _filter_sample_rate) > 0.01f) {
 				PX4_DEBUG("sample rate changed: %.3f Hz -> %.3f Hz", (double)_filter_sample_rate, (double)sample_rate_hz);
 				_filter_sample_rate = sample_rate_hz;
 				sample_rate_changed = true;
@@ -162,10 +165,11 @@ bool VehicleAcceleration::SensorSelectionUpdate(bool force)
 
 				const uint32_t device_id = sensor_accel_sub.get().device_id;
 
-				if ((device_id != 0) && (device_id == sensor_selection.accel_device_id)) {
+				if (sensor_accel_sub.advertised() && (sensor_accel_sub.get().timestamp != 0)
+				    && (device_id != 0) && (device_id == sensor_selection.accel_device_id)) {
 
 					if (_sensor_sub.ChangeInstance(i) && _sensor_sub.registerCallback()) {
-						PX4_DEBUG("selected sensor changed %d -> %d", _calibration.device_id(), device_id);
+						PX4_DEBUG("selected sensor changed %" PRIu32 " -> %" PRIu32 "", _calibration.device_id(), device_id);
 
 						// clear bias and corrections
 						_bias.zero();
@@ -179,7 +183,7 @@ bool VehicleAcceleration::SensorSelectionUpdate(bool force)
 				}
 			}
 
-			PX4_ERR("unable to find or subscribe to selected sensor (%d)", sensor_selection.accel_device_id);
+			PX4_ERR("unable to find or subscribe to selected sensor (%" PRIu32 ")", sensor_selection.accel_device_id);
 			_calibration.set_device_id(0);
 		}
 	}
@@ -190,10 +194,10 @@ bool VehicleAcceleration::SensorSelectionUpdate(bool force)
 void VehicleAcceleration::ParametersUpdate(bool force)
 {
 	// Check if parameters have changed
-	if (_params_sub.updated() || force) {
+	if (_parameter_update_sub.updated() || force) {
 		// clear update
 		parameter_update_s param_update;
-		_params_sub.copy(&param_update);
+		_parameter_update_sub.copy(&param_update);
 
 		updateParams();
 
@@ -211,43 +215,57 @@ void VehicleAcceleration::Run()
 	// update corrections first to set _selected_sensor
 	bool selection_updated = SensorSelectionUpdate();
 
-	_calibration.SensorCorrectionsUpdate(selection_updated);
-	SensorBiasUpdate(selection_updated);
 	ParametersUpdate();
+
+	_calibration.SensorCorrectionsUpdate(selection_updated);
+
+	SensorBiasUpdate(selection_updated);
+
+	// require valid sensor sample rate to run
+	if (!PX4_ISFINITE(_filter_sample_rate)) {
+		CheckAndUpdateFilters();
+
+		if (!PX4_ISFINITE(_filter_sample_rate)) {
+			return;
+		}
+	}
 
 	// process all outstanding messages
 	sensor_accel_s sensor_data;
 
 	while (_sensor_sub.update(&sensor_data)) {
+		const Vector3f accel_raw{sensor_data.x, sensor_data.y, sensor_data.z};
 
-		// Apply calibration and filter
-		//  - calibration offsets, scale factors, and thermal scale (if available)
-		//  - estimated in run bias (if available)
-		//  - biquad low-pass filter
-		const Vector3f accel_corrected = _calibration.Correct(Vector3f{sensor_data.x, sensor_data.y, sensor_data.z}) - _bias;
-		const Vector3f accel_filtered = _lp_filter.apply(accel_corrected);
+		if (accel_raw.isAllFinite()) {
+			// Apply calibration and filter
+			//  - calibration offsets, scale factors, and thermal scale (if available)
+			//  - estimated in run bias (if available)
+			//  - biquad low-pass filter
+			const Vector3f accel_corrected = _calibration.Correct(accel_raw) - _bias;
+			const Vector3f accel_filtered = _lp_filter.apply(accel_corrected);
 
-		_acceleration_prev = accel_corrected;
+			_acceleration_prev = accel_corrected;
 
-		// publish once all new samples are processed
-		if (!_sensor_sub.updated()) {
-			// Publish vehicle_acceleration
-			vehicle_acceleration_s v_acceleration;
-			v_acceleration.timestamp_sample = sensor_data.timestamp_sample;
-			accel_filtered.copyTo(v_acceleration.xyz);
-			v_acceleration.timestamp = hrt_absolute_time();
-			_vehicle_acceleration_pub.publish(v_acceleration);
+			// publish once all new samples are processed
+			if (!_sensor_sub.updated()) {
+				// Publish vehicle_acceleration
+				vehicle_acceleration_s v_acceleration;
+				v_acceleration.timestamp_sample = sensor_data.timestamp_sample;
+				accel_filtered.copyTo(v_acceleration.xyz);
+				v_acceleration.timestamp = hrt_absolute_time();
+				_vehicle_acceleration_pub.publish(v_acceleration);
 
-			return;
+				return;
+			}
 		}
 	}
 }
 
 void VehicleAcceleration::PrintStatus()
 {
-	PX4_INFO("selected sensor: %d, rate: %.1f Hz, estimated bias: [%.4f %.4f %.4f]",
-		 _calibration.device_id(), (double)_filter_sample_rate,
-		 (double)_bias(0), (double)_bias(1), (double)_bias(2));
+	PX4_INFO_RAW("[vehicle_acceleration] selected sensor: %" PRIu32 ", rate: %.1f Hz, estimated bias: [%.4f %.4f %.4f]\n",
+		     _calibration.device_id(), (double)_filter_sample_rate,
+		     (double)_bias(0), (double)_bias(1), (double)_bias(2));
 
 	_calibration.PrintStatus();
 }

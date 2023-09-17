@@ -43,6 +43,9 @@
 
 #include "mavlink_stream.h"
 
+#define DEFINE_GET_PX4_CUSTOM_MODE
+#include <commander/px4_custom_mode.h>
+
 class StreamListItem
 {
 
@@ -72,7 +75,6 @@ MavlinkStream *create_mavlink_stream(const char *stream_name, Mavlink *mavlink);
 
 MavlinkStream *create_mavlink_stream(const uint16_t msg_id, Mavlink *mavlink);
 
-void get_mavlink_navigation_mode(const struct vehicle_status_s *const status, uint8_t *mavlink_base_mode,
-				 union px4_custom_mode *custom_mode);
+union px4_custom_mode get_px4_custom_mode(uint8_t nav_state);
 
 #endif /* MAVLINK_MESSAGES_H_ */

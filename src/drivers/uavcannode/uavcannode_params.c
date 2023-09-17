@@ -32,17 +32,6 @@
  ****************************************************************************/
 
 /**
- * UAVCAN Node ID.
- *
- * Read the specs at http://uavcan.org to learn more about Node ID.
- *
- * @min 1
- * @max 125
- * @group UAVCAN
- */
-PARAM_DEFINE_INT32(CANNODE_NODE_ID, 120);
-
-/**
  * UAVCAN CAN bus bitrate.
  *
  * @min 20000
@@ -50,3 +39,40 @@ PARAM_DEFINE_INT32(CANNODE_NODE_ID, 120);
  * @group UAVCAN
  */
 PARAM_DEFINE_INT32(CANNODE_BITRATE, 1000000);
+
+/**
+ * CAN built-in bus termination
+ *
+ * @boolean
+ * @max 1
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(CANNODE_TERM, 0);
+
+/**
+ * Enable MovingBaselineData subscription
+ *
+ * @boolean
+ * @max 1
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(CANNODE_SUB_MBD, 0);
+
+/**
+ * Enable RTCM subscription
+ *
+ * @boolean
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(CANNODE_SUB_RTCM, 0);
+
+/**
+ * Enable MovingBaselineData publication
+ *
+ * @boolean
+ * @reboot_required true
+ * @group UAVCAN
+ */
+PARAM_DEFINE_INT32(CANNODE_PUB_MBD, 0);

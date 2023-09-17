@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2013-2016 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2013-2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -60,13 +60,10 @@ using namespace time_literals;
 class LightwareLaser : public device::I2C, public I2CSPIDriver<LightwareLaser>
 {
 public:
-	LightwareLaser(I2CSPIBusOption bus_option, const int bus, const uint8_t rotation, int bus_frequency,
-		       int address = LIGHTWARE_LASER_BASEADDR);
+	LightwareLaser(const I2CSPIDriverConfig &config);
 
 	~LightwareLaser() override;
 
-	static I2CSPIDriverBase *instantiate(const BusCLIArguments &cli, const BusInstanceIterator &iterator,
-					     int runtime_instance);
 	static void print_usage();
 
 	int init() override;
@@ -132,12 +129,12 @@ private:
 	int _consecutive_errors{0};
 };
 
-LightwareLaser::LightwareLaser(I2CSPIBusOption bus_option, const int bus, const uint8_t rotation, int bus_frequency,
-			       int address) :
-	I2C(DRV_DIST_DEVTYPE_LIGHTWARE_LASER, MODULE_NAME, bus, address, bus_frequency),
-	I2CSPIDriver(MODULE_NAME, px4::device_bus_to_wq(get_device_id()), bus_option, bus),
-	_px4_rangefinder(DRV_DIST_DEVTYPE_LIGHTWARE_LASER, rotation)
+LightwareLaser::LightwareLaser(const I2CSPIDriverConfig &config) :
+	I2C(config),
+	I2CSPIDriver(config),
+	_px4_rangefinder(get_device_id(), config.rotation)
 {
+	_px4_rangefinder.set_device_type(DRV_DIST_DEVTYPE_LIGHTWARE_LASER);
 }
 
 LightwareLaser::~LightwareLaser()
@@ -178,33 +175,46 @@ int LightwareLaser::init()
 
 	case 4:
 		/* SF11/c (120m 20Hz) */
-		_px4_rangefinder.set_min_distance(0.01f);
+		_px4_rangefinder.set_min_distance(0.2f);
 		_px4_rangefinder.set_max_distance(120.0f);
 		_conversion_interval = 50000;
 		break;
 
 	case 5:
 		/* SF/LW20/b (50m 48-388Hz) */
-		_px4_rangefinder.set_min_distance(0.001f);
+		_px4_rangefinder.set_min_distance(0.2f);
 		_px4_rangefinder.set_max_distance(50.0f);
 		_conversion_interval = 20834;
 		break;
 
 	case 6:
 		/* SF/LW20/c (100m 48-388Hz) */
-		_px4_rangefinder.set_min_distance(0.001f);
+		_px4_rangefinder.set_min_distance(0.2f);
 		_px4_rangefinder.set_max_distance(100.0f);
 		_conversion_interval = 20834;
 		_type = Type::LW20c;
 		break;
 
+	case 7:
+		/* SF/LW30/d (200m 49-20'000Hz) */
+		_px4_rangefinder.set_min_distance(0.2f);
+		_px4_rangefinder.set_max_distance(200.0f);
+		_conversion_interval = 20409;
+		break;
+
 	default:
-		PX4_ERR("invalid HW model %d.", hw_model);
+		PX4_ERR("invalid HW model %" PRId32 ".", hw_model);
 		return ret;
 	}
 
 	/* do I2C init (and probe) first */
-	return I2C::init();
+	ret = I2C::init();
+
+	if (ret == PX4_OK) {
+		start();
+	}
+
+	return ret;
 }
 
 int LightwareLaser::readRegister(Register reg, uint8_t *data, int len)
@@ -256,17 +266,26 @@ int LightwareLaser::enableI2CBinaryProtocol()
 		return ret;
 	}
 
-	// now read and check against the expected values
-	uint8_t value[2];
-	ret = transfer(cmd, 1, value, sizeof(value));
+	// Now read and check against the expected values
+	for (int i = 0; i < 2; ++i) {
+		uint8_t value[2];
+		ret = transfer(cmd, 1, value, sizeof(value));
 
-	if (ret != 0) {
-		return ret;
+		if (ret != 0) {
+			return ret;
+		}
+
+		PX4_DEBUG("protocol values: 0x%" PRIx8 " 0x%" PRIx8, value[0], value[1]);
+
+		if (value[0] == 0xcc && value[1] == 0x00) {
+			return 0;
+		}
+
+		// Occasionally the previous transfer returns ret == value[0] == value[1] == 0. If so, wait a bit and retry
+		px4_usleep(1000);
 	}
 
-	PX4_DEBUG("protocol values: 0x%x 0x%x", value[0], value[1]);
-
-	return (value[0] == 0xcc && value[1] == 0x00) ? 0 : -1;
+	return -1;
 }
 
 int LightwareLaser::configure()
@@ -347,7 +366,7 @@ int LightwareLaser::collect()
 		perf_end(_sample_perf);
 
 		// compare different outputs (median filter adds about 25ms delay)
-		PX4_DEBUG("fm: %4i, fs: %2i%%, lm: %4i, lr: %4i, fs: %2i%%, n: %i",
+		PX4_DEBUG("fm: %4" PRIi16 ", fs: %2" PRIi16 "%%, lm: %4" PRIi16 ", lr: %4" PRIi16 ", fs: %2" PRIi16 "%%, n: %" PRIi16,
 			  data.first_return_median, data.first_return_strength, data.last_return_median, data.last_return_raw,
 			  data.last_return_strength, data.background_noise);
 
@@ -414,34 +433,16 @@ void LightwareLaser::print_usage()
 
 I2C bus driver for Lightware SFxx series LIDAR rangefinders: SF10/a, SF10/b, SF10/c, SF11/c, SF/LW20.
 
-Setup/usage information: https://docs.px4.io/master/en/sensor/sfxx_lidar.html
+Setup/usage information: https://docs.px4.io/main/en/sensor/sfxx_lidar.html
 )DESCR_STR");
 
 	PRINT_MODULE_USAGE_NAME("lightware_laser_i2c", "driver");
 	PRINT_MODULE_USAGE_SUBCATEGORY("distance_sensor");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_PARAMS_I2C_SPI_DRIVER(true, false);
+	PRINT_MODULE_USAGE_PARAMS_I2C_ADDRESS(0x66);
 	PRINT_MODULE_USAGE_PARAM_INT('R', 25, 0, 25, "Sensor rotation - downward facing by default", true);
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
-}
-
-I2CSPIDriverBase *LightwareLaser::instantiate(const BusCLIArguments &cli, const BusInstanceIterator &iterator,
-				      int runtime_instance)
-{
-	LightwareLaser* instance = new LightwareLaser(iterator.configuredBusOption(), iterator.bus(), cli.orientation, cli.bus_frequency);
-
-	if (instance == nullptr) {
-		PX4_ERR("alloc failed");
-		return nullptr;
-	}
-
-	if (instance->init() != PX4_OK) {
-		delete instance;
-		return nullptr;
-	}
-
-	instance->start();
-	return instance;
 }
 
 extern "C" __EXPORT int lightware_laser_i2c_main(int argc, char *argv[])
@@ -449,18 +450,19 @@ extern "C" __EXPORT int lightware_laser_i2c_main(int argc, char *argv[])
 	int ch;
 	using ThisDriver = LightwareLaser;
 	BusCLIArguments cli{true, false};
-	cli.orientation = distance_sensor_s::ROTATION_DOWNWARD_FACING;
+	cli.rotation = (Rotation)distance_sensor_s::ROTATION_DOWNWARD_FACING;
 	cli.default_i2c_frequency = 400000;
+	cli.i2c_address = LIGHTWARE_LASER_BASEADDR;
 
-	while ((ch = cli.getopt(argc, argv, "R:")) != EOF) {
+	while ((ch = cli.getOpt(argc, argv, "R:")) != EOF) {
 		switch (ch) {
 		case 'R':
-			cli.orientation = atoi(cli.optarg());
+			cli.rotation = (Rotation)atoi(cli.optArg());
 			break;
 		}
 	}
 
-	const char *verb = cli.optarg();
+	const char *verb = cli.optArg();
 
 	if (!verb) {
 		ThisDriver::print_usage();

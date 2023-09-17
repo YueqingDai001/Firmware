@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2012-2020 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2012-2022 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -37,84 +37,27 @@
 #include <math.h>
 
 #include <board_config.h>
-#include <drivers/device/device.h>
-#include <drivers/device/i2c.h>
+
 #include <drivers/drv_hrt.h>
-#include <drivers/drv_input_capture.h>
-#include <drivers/drv_mixer.h>
 #include <drivers/drv_pwm_output.h>
-#include <lib/cdev/CDev.hpp>
 #include <lib/mathlib/mathlib.h>
 #include <lib/mixer_module/mixer_module.hpp>
-#include <lib/parameters/param.h>
 #include <lib/perf/perf_counter.h>
+#include <px4_arch/io_timer.h>
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/log.h>
 #include <px4_platform_common/module.h>
-#include <uORB/Publication.hpp>
-#include <uORB/PublicationMulti.hpp>
 #include <uORB/Subscription.hpp>
-#include <uORB/SubscriptionCallback.hpp>
-#include <uORB/topics/actuator_armed.h>
-#include <uORB/topics/actuator_controls.h>
-#include <uORB/topics/actuator_outputs.h>
-#include <uORB/topics/multirotor_motor_limits.h>
 #include <uORB/topics/parameter_update.h>
 
 using namespace time_literals;
 
-/** Mode given via CLI */
-enum PortMode {
-	PORT_MODE_UNSET = 0,
-	PORT_FULL_GPIO,
-	PORT_FULL_PWM,
-	PORT_PWM8,
-	PORT_PWM6,
-	PORT_PWM5,
-	PORT_PWM4,
-	PORT_PWM3,
-	PORT_PWM2,
-	PORT_PWM1,
-	PORT_PWM3CAP1,
-	PORT_PWM4CAP1,
-	PORT_PWM4CAP2,
-	PORT_PWM5CAP1,
-	PORT_PWM2CAP2,
-	PORT_CAPTURE,
-};
-
-#if !defined(BOARD_HAS_PWM)
-#  error "board_config.h needs to define BOARD_HAS_PWM"
-#endif
-
-// TODO: keep in sync with drivers/camera_capture
-#define PX4FMU_DEVICE_PATH	"/dev/px4fmu"
-
-class PWMOut : public cdev::CDev, public ModuleBase<PWMOut>, public OutputModuleInterface
+class PWMOut final : public ModuleBase<PWMOut>, public OutputModuleInterface
 {
 public:
-	enum Mode {
-		MODE_NONE,
-		MODE_1PWM,
-		MODE_2PWM,
-		MODE_2PWM2CAP,
-		MODE_3PWM,
-		MODE_3PWM1CAP,
-		MODE_4PWM,
-		MODE_4PWM1CAP,
-		MODE_4PWM2CAP,
-		MODE_5PWM,
-		MODE_5PWM1CAP,
-		MODE_6PWM,
-		MODE_8PWM,
-		MODE_14PWM,
-		MODE_4CAP,
-		MODE_5CAP,
-		MODE_6CAP,
-	};
 	PWMOut();
-	virtual ~PWMOut();
+	~PWMOut() override;
 
 	/** @see ModuleBase */
 	static int task_spawn(int argc, char *argv[]);
@@ -125,82 +68,31 @@ public:
 	/** @see ModuleBase */
 	static int print_usage(const char *reason = nullptr);
 
-	void Run() override;
-
 	/** @see ModuleBase::print_status() */
 	int print_status() override;
-
-	/** change the FMU mode of the running module */
-	static int fmu_new_mode(PortMode new_mode);
-
-	static int test();
-
-	virtual int	ioctl(file *filp, int cmd, unsigned long arg);
-
-	virtual int	init();
-
-	int		set_mode(Mode mode);
-	Mode		get_mode() { return _mode; }
-
-	static int	set_i2c_bus_clock(unsigned bus, unsigned clock_hz);
-
-	static void	capture_trampoline(void *context, uint32_t chan_index,
-					   hrt_abstime edge_time, uint32_t edge_state,
-					   uint32_t overflow);
-
-	void update_pwm_trims();
 
 	bool updateOutputs(bool stop_motors, uint16_t outputs[MAX_ACTUATORS],
 			   unsigned num_outputs, unsigned num_control_groups_updated) override;
 
 private:
-	static constexpr int FMU_MAX_ACTUATORS = DIRECT_PWM_OUTPUT_CHANNELS;
-	static_assert(FMU_MAX_ACTUATORS <= MAX_ACTUATORS, "Increase MAX_ACTUATORS if this fails");
+	void Run() override;
 
-	MixingOutput _mixing_output{FMU_MAX_ACTUATORS, *this, MixingOutput::SchedulingPolicy::Auto, true};
+	void update_params();
+	bool update_pwm_out_state(bool on);
 
-	Mode		_mode{MODE_NONE};
+	MixingOutput _mixing_output{PARAM_PREFIX, DIRECT_PWM_OUTPUT_CHANNELS, *this, MixingOutput::SchedulingPolicy::Auto, true};
 
-	uint32_t	_backup_schedule_interval_us{1_s};
+	int _timer_rates[MAX_IO_TIMERS] {};
 
-	unsigned	_pwm_default_rate{50};
-	unsigned	_pwm_alt_rate{50};
-	uint32_t	_pwm_alt_rate_channels{0};
+	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
-	unsigned	_current_update_rate{0};
-
-	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};
-
-
-	unsigned	_num_outputs{0};
-	int		_class_instance{-1};
+	unsigned	_num_outputs{DIRECT_PWM_OUTPUT_CHANNELS};
 
 	bool		_pwm_on{false};
 	uint32_t	_pwm_mask{0};
 	bool		_pwm_initialized{false};
-	bool		_test_mode{false};
+	bool		_first_update_cycle{true};
 
-	unsigned	_num_disarmed_set{0};
-
-	perf_counter_t	_cycle_perf;
-	perf_counter_t	_interval_perf;
-
-	void		capture_callback(uint32_t chan_index,
-					 hrt_abstime edge_time, uint32_t edge_state, uint32_t overflow);
-	void		update_current_rate();
-	int			set_pwm_rate(unsigned rate_map, unsigned default_rate, unsigned alt_rate);
-	int			pwm_ioctl(file *filp, int cmd, unsigned long arg);
-	void		update_pwm_rev_mask();
-	void		update_pwm_out_state(bool on);
-
-	void		update_params();
-
-	static void		sensor_reset(int ms);
-	static void		peripheral_reset(int ms);
-
-	int		capture_ioctl(file *filp, int cmd, unsigned long arg);
-
-	PWMOut(const PWMOut &) = delete;
-	PWMOut operator=(const PWMOut &) = delete;
-
+	perf_counter_t	_cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
+	perf_counter_t	_interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
 };

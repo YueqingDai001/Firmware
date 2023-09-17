@@ -37,10 +37,14 @@
  * Base class for devices connected via I2C.
  */
 
-#ifndef _DEVICE_I2C_H
-#define _DEVICE_I2C_H
+#pragma once
 
 #include "../CDev.hpp"
+#include <px4_platform_common/i2c.h>
+
+#if defined(CONFIG_I2C)
+
+struct I2CSPIDriverConfig;
 
 namespace device __EXPORT
 {
@@ -61,6 +65,19 @@ public:
 
 	virtual int	init() override;
 
+	typedef int (*_config_i2c_bus_func_t)(uint8_t, uint8_t, uint32_t);
+	typedef int (*_set_i2c_address_func_t)(int, uint8_t);
+	typedef int (*_i2c_transfer_func_t)(int, const uint8_t *, const unsigned, uint8_t *, const unsigned);
+
+	static void configure_callbacks(_config_i2c_bus_func_t config_func,
+					_set_i2c_address_func_t addr_func,
+					_i2c_transfer_func_t transfer_func)
+	{
+		_config_i2c_bus = config_func;
+		_set_i2c_address = addr_func;
+		_i2c_transfer = transfer_func;
+	}
+
 protected:
 	/**
 	 * The number of times a read or write operation will be retried on
@@ -78,12 +95,15 @@ protected:
 	 * @param frequency	I2C bus frequency for the device (currently not used)
 	 */
 	I2C(uint8_t device_type, const char *name, const int bus, const uint16_t address, const uint32_t frequency);
+	I2C(const I2CSPIDriverConfig &config);
 	virtual ~I2C();
 
 	/**
 	 * Check for the presence of the device on the bus.
 	 */
 	virtual int	probe() { return PX4_OK; }
+
+	virtual void set_device_address(int address);
 
 	/**
 	 * Perform an I2C transaction to the device.
@@ -102,9 +122,12 @@ protected:
 	virtual bool	external() const override { return px4_i2c_bus_external(_device_id.devid_s.bus); }
 
 private:
-	uint32_t		_frequency{0};
-	int			_fd{-1};
-
+	uint32_t		               _frequency{0};
+	int                            _i2c_fd{-1};
+	static _config_i2c_bus_func_t  _config_i2c_bus;
+	static _set_i2c_address_func_t _set_i2c_address;
+	static _i2c_transfer_func_t    _i2c_transfer;
+	static pthread_mutex_t         _mutex;
 };
 
 } // namespace device

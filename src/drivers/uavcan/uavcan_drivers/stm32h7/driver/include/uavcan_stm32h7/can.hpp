@@ -20,10 +20,12 @@ static const uavcan::int16_t ErrNotImplemented          = 1001; ///< Feature not
 static const uavcan::int16_t ErrInvalidBitRate          = 1002; ///< Bit rate not supported
 static const uavcan::int16_t ErrLogic                   = 1003; ///< Internal logic error
 static const uavcan::int16_t ErrUnsupportedFrame        = 1004; ///< Frame not supported (e.g. RTR, CAN FD, etc)
-static const uavcan::int16_t ErrMsrInakNotSet           = 1005; ///< INAK bit of the MSR register is not 1
-static const uavcan::int16_t ErrMsrInakNotCleared       = 1006; ///< INAK bit of the MSR register is not 0
+static const uavcan::int16_t ErrCCCrCSANotSet           = 1005; ///< CSA bit of the CCCR register is not 1
+static const uavcan::int16_t ErrCCCrCSANotCleared       = 1006; ///< CSA bit of the CCCR register is not 0
 static const uavcan::int16_t ErrBitRateNotDetected      = 1007; ///< Auto bit rate detection could not be finished
 static const uavcan::int16_t ErrFilterNumConfigs        = 1008; ///< Number of filters is more than supported
+static const uavcan::int16_t ErrCCCrINITNotSet          = 1000; ///< INIT bit of the CCCR register is not 1
+static const uavcan::int16_t ErrCCCrINITNotCleared      = 1010; ///< INIT bit of the CCCR register is not 0
 
 /**
  * RX queue item.
@@ -110,7 +112,7 @@ class CanIface : public uavcan::ICanIface, uavcan::Noncopyable
 		uavcan::uint32_t ExtIdFilterSA;
 		uavcan::uint32_t RxFIFO0SA;
 		uavcan::uint32_t RxFIFO1SA;
-		uavcan::uint32_t TxQueueSA;
+		uavcan::uint32_t TxFIFOSA;
 	} message_ram_;
 
 	enum { NumTxMailboxes = 32 }; // Should match the number of Tx FIFOs available in message RAM
@@ -138,6 +140,8 @@ class CanIface : public uavcan::ICanIface, uavcan::Noncopyable
 			uavcan::uint16_t num_configs);
 
 	virtual uavcan::uint16_t getNumFilters() const { return NumFilters; }
+
+	bool waitCCCRBitStateChange(uint32_t mask, bool target_state);
 
 public:
 	enum { MaxRxQueueCapacity = 64 };
@@ -172,6 +176,8 @@ public:
 
 	void handleTxInterrupt(uavcan::uint64_t utc_usec);
 	void handleRxInterrupt(uavcan::uint8_t fifo_index);
+
+	void handleBusOff();
 
 	/**
 	 * This method is used to count errors and abort transmission on error if necessary.
@@ -257,7 +263,7 @@ public:
 #else
 		, num_ifaces_(1)
 #endif
-		, enabledInterfaces_(0x7)
+		, enabledInterfaces_(0x3)
 	{
 		uavcan::StaticAssert < (RxQueueCapacity <= CanIface::MaxRxQueueCapacity) >::check();
 	}
@@ -337,8 +343,7 @@ public:
 	 *
 	 * @return                  Negative value on error; non-negative on success. Refer to constants Err*.
 	 */
-	template <typename DelayCallable>
-	int init(DelayCallable delay_callable, uavcan::uint32_t &inout_bitrate = BitRateAutoDetect)
+	int init(uavcan::uint32_t &inout_bitrate = BitRateAutoDetect)
 	{
 		if (inout_bitrate > 0) {
 			return driver.init(inout_bitrate, CanIface::NormalMode, enabledInterfaces_);
@@ -356,7 +361,7 @@ public:
 
 				const int res = driver.init(inout_bitrate, CanIface::SilentMode, enabledInterfaces_);
 
-				delay_callable();
+				usleep(1000000);
 
 				if (res >= 0) {
 					for (uavcan::uint8_t iface = 0; iface < driver.getNumIfaces(); iface++) {

@@ -32,7 +32,10 @@
 ############################################################################
 
 add_subdirectory(../stm32_common/io_pins io_pins)
+add_subdirectory(../stm32_common/spi spi)
 add_subdirectory(../stm32_common/hrt hrt)
 add_subdirectory(../stm32_common/board_critmon board_critmon)
 add_subdirectory(../stm32_common/board_reset board_reset)
 add_subdirectory(../stm32_common/version version)
+
+add_subdirectory(watchdog)

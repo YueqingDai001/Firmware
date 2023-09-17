@@ -47,6 +47,7 @@
 #include <parameters/param.h>
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
+#include <uORB/SubscriptionInterval.hpp>
 #include <uORB/topics/vehicle_acceleration.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_local_position.h>
@@ -57,8 +58,10 @@
 #include <matrix/math.hpp>
 #include <mathlib/mathlib.h>
 #include <matrix/Matrix.hpp>
+#include <lib/conversion/rotation.h>
 #include "KalmanFilter.h"
 
+using namespace time_literals;
 
 namespace landing_target_estimator
 {
@@ -96,7 +99,7 @@ protected:
 	uORB::Publication<landing_target_innovations_s> _targetInnovationsPub{ORB_ID(landing_target_innovations)};
 	landing_target_innovations_s _target_innovations{};
 
-	uORB::Subscription _parameterSub{ORB_ID(parameter_update)};
+	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 private:
 
@@ -116,6 +119,10 @@ private:
 		param_t mode;
 		param_t scale_x;
 		param_t scale_y;
+		param_t offset_x;
+		param_t offset_y;
+		param_t offset_z;
+		param_t sensor_yaw;
 	} _paramHandle;
 
 	struct {
@@ -126,7 +133,18 @@ private:
 		TargetMode mode;
 		float scale_x;
 		float scale_y;
+		float offset_x;
+		float offset_y;
+		float offset_z;
+		enum Rotation sensor_yaw;
 	} _params;
+
+	struct {
+		hrt_abstime timestamp;
+		float rel_pos_x;
+		float rel_pos_y;
+		float rel_pos_z;
+	} _target_position_report;
 
 	uORB::Subscription _vehicleLocalPositionSub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _attitudeSub{ORB_ID(vehicle_attitude)};
@@ -143,21 +161,22 @@ private:
 	bool _vehicleAttitude_valid{false};
 	bool _vehicle_acceleration_valid{false};
 	bool _new_irlockReport{false};
+	bool _new_sensorReport{false};
 	bool _estimator_initialized{false};
 	// keep track of whether last measurement was rejected
 	bool _faulty{false};
 
-	matrix::Dcmf _R_att;
+	matrix::Dcmf _R_att; //Orientation of the body frame
+	matrix::Dcmf _S_att; //Orientation of the sensor relative to body frame
 	matrix::Vector2f _rel_pos;
 	KalmanFilter _kalman_filter_x;
 	KalmanFilter _kalman_filter_y;
 	hrt_abstime _last_predict{0}; // timestamp of last filter prediction
 	hrt_abstime _last_update{0}; // timestamp of last filter update (used to check timeout)
+	float _dist_z{1.0f};
 
 	void _check_params(const bool force);
 
 	void _update_state();
 };
-
-
 } // namespace landing_target_estimator

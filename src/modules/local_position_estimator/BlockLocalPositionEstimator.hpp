@@ -5,13 +5,14 @@
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/posix.h>
 #include <lib/controllib/blocks.hpp>
-#include <lib/ecl/geo/geo.h>
+#include <lib/geo/geo.h>
 #include <lib/mathlib/mathlib.h>
 #include <matrix/Matrix.hpp>
 
 // uORB Subscriptions
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
+#include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/actuator_armed.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
@@ -19,12 +20,11 @@
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
-#include <uORB/topics/optical_flow.h>
+#include <uORB/topics/vehicle_optical_flow.h>
 #include <uORB/topics/sensor_combined.h>
 #include <uORB/topics/distance_sensor.h>
 #include <uORB/topics/parameter_update.h>
-#include <uORB/topics/manual_control_setpoint.h>
-#include <uORB/topics/vehicle_gps_position.h>
+#include <uORB/topics/sensor_gps.h>
 #include <uORB/topics/landing_target_pose.h>
 #include <uORB/topics/vehicle_air_data.h>
 #include <uORB/topics/vehicle_odometry.h>
@@ -263,13 +263,14 @@ private:
 	// subscriptions
 	uORB::SubscriptionCallbackWorkItem _sensors_sub{this, ORB_ID(sensor_combined)};
 
+	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
+	uORB::Subscription _vehicle_command_sub{ORB_ID(vehicle_command)};
 	uORB::SubscriptionData<actuator_armed_s> _sub_armed{ORB_ID(actuator_armed)};
 	uORB::SubscriptionData<vehicle_land_detected_s> _sub_land{ORB_ID(vehicle_land_detected)};
 	uORB::SubscriptionData<vehicle_attitude_s> _sub_att{ORB_ID(vehicle_attitude)};
 	uORB::SubscriptionData<vehicle_angular_velocity_s> _sub_angular_velocity{ORB_ID(vehicle_angular_velocity)};
-	uORB::SubscriptionData<optical_flow_s> _sub_flow{ORB_ID(optical_flow)};
-	uORB::SubscriptionData<parameter_update_s> _sub_param_update{ORB_ID(parameter_update)};
-	uORB::SubscriptionData<vehicle_gps_position_s> _sub_gps{ORB_ID(vehicle_gps_position)};
+	uORB::SubscriptionData<vehicle_optical_flow_s> _sub_flow{ORB_ID(vehicle_optical_flow)};
+	uORB::SubscriptionData<sensor_gps_s> _sub_gps{ORB_ID(vehicle_gps_position)};
 	uORB::SubscriptionData<vehicle_odometry_s> _sub_visual_odom{ORB_ID(vehicle_visual_odometry)};
 	uORB::SubscriptionData<vehicle_odometry_s> _sub_mocap_odom{ORB_ID(vehicle_mocap_odometry)};
 	uORB::SubscriptionData<distance_sensor_s> _sub_dist0{ORB_ID(distance_sensor), 0};
@@ -292,7 +293,10 @@ private:
 	uORB::PublicationData<estimator_innovations_s> _pub_innov_var{ORB_ID(estimator_innovation_variances)};
 
 	// map projection
-	struct map_projection_reference_s _map_ref;
+	MapProjection _map_ref;
+
+	MapProjection _global_local_proj_ref{};
+	float _global_local_alt0{NAN};
 
 	// target mode paramters from landing_target_estimator module
 	enum TargetMode {
@@ -378,7 +382,6 @@ private:
 
 	// local to global coversion related variables
 	bool _is_global_cov_init;
-	uint64_t _global_ref_timestamp;
 	double _ref_lat;
 	double _ref_lon;
 	float _ref_alt;
@@ -397,8 +400,6 @@ private:
 
 
 	DEFINE_PARAMETERS(
-		(ParamInt<px4::params::SYS_AUTOSTART>) _param_sys_autostart,   /**< example parameter */
-
 		// general parameters
 		(ParamInt<px4::params::LPE_FUSION>) _param_lpe_fusion,
 		(ParamFloat<px4::params::LPE_VXY_PUB>) _param_lpe_vxy_pub,

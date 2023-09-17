@@ -31,17 +31,90 @@
 #
 ############################################################################
 
-add_subdirectory(Takeoff)
+
+###########################################
+# Prepare flight tasks
+###########################################
+
+# add core flight tasks to list
+set(flight_tasks_all)
+list(APPEND flight_tasks_all
+	Auto
+	Descend
+	Failsafe
+	ManualAcceleration
+	ManualAltitude
+	ManualAltitudeSmoothVel
+	ManualPosition
+	ManualPositionSmoothVel
+	Transition
+)
+
+if(NOT px4_constrained_flash_build)
+	list(APPEND flight_tasks_all
+		AutoFollowTarget
+		Orbit
+	)
+endif()
+
+# set the files to be generated
+set(files_to_generate
+	FlightTasks_generated.hpp
+	FlightTasks_generated.cpp
+)
+
+# generate files needed for Flight Tasks
+set(python_args
+	-t ${flight_tasks_all}
+	-i ${CMAKE_CURRENT_SOURCE_DIR}/Templates
+	-o ${CMAKE_CURRENT_BINARY_DIR}
+	-f ${files_to_generate}
+)
+
+# generate the files using the python script and template
+add_custom_command(
+	OUTPUT
+		${CMAKE_CURRENT_BINARY_DIR}/FlightTasks_generated.hpp
+		${CMAKE_CURRENT_BINARY_DIR}/FlightTasks_generated.cpp
+	COMMAND ${PYTHON_EXECUTABLE} generate_flight_tasks.py ${python_args}
+	COMMENT "Generating Flight Tasks"
+	DEPENDS
+		Templates/FlightTasks_generated.cpp.em
+		Templates/FlightTasks_generated.hpp.em
+	WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+	VERBATIM
+)
+add_custom_target(flighttasks_generated
+	DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/FlightTasks_generated.cpp)
+add_dependencies(prebuild_targets flighttasks_generated)
+
+add_compile_options(
+	-Wno-cast-align
+) # TODO: fix and enable
+
+# add subdirectory containing all tasks
+add_subdirectory(tasks)
 
 px4_add_module(
 	MODULE modules__flight_mode_manager
 	MAIN flight_mode_manager
 	COMPILE_FLAGS
+	INCLUDES
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_BINARY_DIR}
 	SRCS
 		FlightModeManager.cpp
 		FlightModeManager.hpp
+
+		${CMAKE_CURRENT_BINARY_DIR}/FlightTasks_generated.hpp
+		${CMAKE_CURRENT_BINARY_DIR}/FlightTasks_generated.cpp
 	DEPENDS
-		FlightTasks
-		Takeoff
 		px4_work_queue
-	)
+		WeatherVane
+		flighttasks_generated
+)
+
+# add all flight task dependencies
+foreach(task ${flight_tasks_all})
+	target_link_libraries(modules__flight_mode_manager PUBLIC FlightTask${task})
+endforeach()

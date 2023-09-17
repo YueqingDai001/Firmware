@@ -39,7 +39,9 @@
 
 #pragma once
 
-#include <px4_platform_common/log.h>
+#include <sys/ioctl.h>
+#include <px4_boardconfig.h>
+
 
 /****************************************************************************
  * Defines for all platforms.
@@ -50,8 +52,10 @@
 
 /* Define PX4_ISFINITE */
 #ifdef __cplusplus
-constexpr bool PX4_ISFINITE(float x) { return __builtin_isfinite(x); }
-constexpr bool PX4_ISFINITE(double x) { return __builtin_isfinite(x); }
+static inline constexpr bool PX4_ISFINITE(float x) { return __builtin_isfinite(x); }
+static inline constexpr bool PX4_ISFINITE(double x) { return __builtin_isfinite(x); }
+#else
+#define PX4_ISFINITE(x) __builtin_isfinite(x)
 #endif /* __cplusplus */
 
 #if defined(__PX4_NUTTX)
@@ -89,33 +93,17 @@ constexpr bool PX4_ISFINITE(double x) { return __builtin_isfinite(x); }
 #define USEC_PER_TICK (1000000/PX4_TICKS_PER_SEC)
 #define USEC2TICK(x) (((x)+(USEC_PER_TICK/2))/USEC_PER_TICK)
 
-#ifdef __PX4_QURT
-
-// QURT specific
-#  include "dspal_math.h"
-#  define PX4_ROOTFSDIR "."
-#  define PX4_TICKS_PER_SEC 1000L
-
-#else // __PX4_QURT
-
-// All POSIX except QURT.
-
 __BEGIN_DECLS
 extern long PX4_TICKS_PER_SEC;
 __END_DECLS
 
-#  if defined(__PX4_POSIX_EAGLE) || defined(__PX4_POSIX_EXCELSIOR)
-#    define PX4_ROOTFSDIR "/home/linaro"
-#  else
-#    define PX4_ROOTFSDIR "."
-#  endif
+#define PX4_ROOTFSDIR CONFIG_BOARD_ROOTFSDIR
 
-#endif // __PX4_QURT
-
+// Qurt doesn't have an SD card for storage
+#ifndef __PX4_QURT
 #define PX4_STORAGEDIR PX4_ROOTFSDIR
-#endif // __PX4_POSIX
+#endif
 
-#if defined(__PX4_POSIX)
 /****************************************************************************
  * Defines for POSIX and ROS
  ****************************************************************************/
@@ -152,6 +140,10 @@ __END_DECLS
 #define M_IVLN10_F		0.43429448f	// 1 / log(10)
 #define M_LOG2_E_F		0.69314718f
 #define M_INVLN2_F		1.44269504f	// 1 / log(2)
+
+/* The M_PI, as stated above, is not C standard. If you need it and
+ * it isn't in your math.h file then you can use this instead. */
+#define M_PI_PRECISE	3.141592653589793238462643383279502884
 
 #define M_DEG_TO_RAD 		0.017453292519943295
 #define M_RAD_TO_DEG 		57.295779513082323

@@ -42,14 +42,16 @@
 
 #include <float.h>
 
+#include <dataman_client/DatamanClient.hpp>
+#include <lib/mathlib/mathlib.h>
 #include <px4_platform_common/module_params.h>
 #include <drivers/drv_hrt.h>
-#include <lib/ecl/geo/geo.h>
+#include <lib/geo/geo.h>
 #include <px4_platform_common/defines.h>
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/home_position.h>
 #include <uORB/topics/vehicle_global_position.h>
-#include <uORB/topics/vehicle_gps_position.h>
+#include <uORB/topics/sensor_gps.h>
 #include <uORB/topics/vehicle_air_data.h>
 
 #define GEOFENCE_FILENAME PX4_STORAGEDIR"/etc/geofence.txt"
@@ -62,7 +64,7 @@ public:
 	Geofence(Navigator *navigator);
 	Geofence(const Geofence &) = delete;
 	Geofence &operator=(const Geofence &) = delete;
-	~Geofence();
+	virtual ~Geofence();
 
 	/* Altitude mode, corresponding to the param GF_ALTMODE */
 	enum {
@@ -77,8 +79,12 @@ public:
 	};
 
 	/**
+	 * @brief function to call regularly to do background work
+	 */
+	void run();
+
+	/**
 	 * update the geofence from dataman.
-	 * It's generally not necessary to call this as it will automatically update when the data is changed.
 	 */
 	void updateFence();
 
@@ -87,8 +93,7 @@ public:
 	 *
 	 * @return true: system is obeying fence, false: system is violating fence
 	 */
-	bool check(const vehicle_global_position_s &global_position,
-		   const vehicle_gps_position_s &gps_position, const home_position_s home_pos, bool home_position_set);
+	bool check(const vehicle_global_position_s &global_position, const sensor_gps_s &gps_position);
 
 	/**
 	 * Return whether a mission item obeys the geofence.
@@ -96,6 +101,20 @@ public:
 	 * @return true: system is obeying fence, false: system is violating fence
 	 */
 	bool check(const struct mission_item_s &mission_item);
+
+	/**
+	 * Check if a point passes the Geofence test.
+	 * In addition to checkPolygons(), this takes all additional parameters into account.
+	 *
+	 * @return false for a geofence violation
+	 */
+	bool checkAll(double lat, double lon, float altitude);
+
+	bool isCloserThanMaxDistToHome(double lat, double lon, float altitude);
+
+	bool isBelowMaxAltitude(float altitude);
+
+	virtual bool isInsidePolygonOrCircle(double lat, double lon, float altitude);
 
 	int clearDm();
 
@@ -122,11 +141,14 @@ public:
 	 */
 	int loadFromFile(const char *filename);
 
-	bool isEmpty() { return _num_polygons == 0; }
+	bool isEmpty() { return (!_fence_updated || (_num_polygons == 0)); }
 
-	int getAltitudeMode() { return _param_gf_altmode.get(); }
 	int getSource() { return _param_gf_source.get(); }
 	int getGeofenceAction() { return _param_gf_action.get(); }
+
+	float getMaxHorDistanceHome() { return _param_gf_max_hor_dist.get(); }
+	float getMaxVerDistanceHome() { return _param_gf_max_ver_dist.get(); }
+	bool getPredict() { return _param_gf_predict.get(); }
 
 	bool isHomeRequired();
 
@@ -136,13 +158,14 @@ public:
 	void printStatus();
 
 private:
-	Navigator	*_navigator{nullptr};
 
-	hrt_abstime _last_horizontal_range_warning{0};
-	hrt_abstime _last_vertical_range_warning{0};
-
-	float _altitude_min{0.0f};
-	float _altitude_max{0.0f};
+	enum class DatamanState {
+		UpdateRequestWait,
+		Read,
+		ReadWait,
+		Load,
+		Error
+	};
 
 	struct PolygonInfo {
 		uint16_t fence_type; ///< one of MAV_CMD_NAV_FENCE_* (can also be a circular region)
@@ -152,27 +175,35 @@ private:
 			float circle_radius;
 		};
 	};
+
+	Navigator   *_navigator{nullptr};
 	PolygonInfo *_polygons{nullptr};
+
+	mission_stats_entry_s _stats;
+	DatamanState _dataman_state{DatamanState::UpdateRequestWait};
+	DatamanState _error_state{DatamanState::UpdateRequestWait};
+	DatamanCache _dataman_cache{"geofence_dm_cache_miss", 4};
+	DatamanClient	&_dataman_client = _dataman_cache.client();
+
+	hrt_abstime _last_horizontal_range_warning{0};
+	hrt_abstime _last_vertical_range_warning{0};
+
+	float _altitude_min{0.0f};
+	float _altitude_max{0.0f};
+
 	int _num_polygons{0};
 
-	map_projection_reference_s _projection_reference = {}; ///< reference to convert (lon, lat) to local [m]
+	MapProjection _projection_reference{}; ///< class to convert (lon, lat) to local [m]
 
-	DEFINE_PARAMETERS(
-		(ParamInt<px4::params::GF_ACTION>) _param_gf_action,
-		(ParamInt<px4::params::GF_ALTMODE>) _param_gf_altmode,
-		(ParamInt<px4::params::GF_SOURCE>) _param_gf_source,
-		(ParamInt<px4::params::GF_COUNT>) _param_gf_count,
-		(ParamFloat<px4::params::GF_MAX_HOR_DIST>) _param_gf_max_hor_dist,
-		(ParamFloat<px4::params::GF_MAX_VER_DIST>) _param_gf_max_ver_dist
-	)
-
-	uORB::SubscriptionData<vehicle_air_data_s>	_sub_airdata;
+	uORB::SubscriptionData<vehicle_air_data_s> _sub_airdata;
 
 	int _outside_counter{0};
-	uint16_t _update_counter{0}; ///< dataman update counter: if it does not match, we polygon data was updated
+	uint16_t _update_counter{0}; ///< dataman update counter: if it does not match, polygon data was updated
+	bool _fence_updated{true};  ///< flag indicating if fence are updated to dataman cache
+	bool _initiate_fence_updated{true}; ///< flag indicating if fence updated is needed
 
 	/**
-	 * implementation of updateFence(), but without locking
+	 * implementation of updateFence()
 	 */
 	void _updateFence();
 
@@ -188,13 +219,7 @@ private:
 	 */
 	bool checkPolygons(double lat, double lon, float altitude);
 
-	/**
-	 * Check if a point passes the Geofence test.
-	 * In addition to checkPolygons(), this takes all additional parameters into account.
-	 *
-	 * @return false for a geofence violation
-	 */
-	bool checkAll(double lat, double lon, float altitude);
+
 
 	bool checkAll(const vehicle_global_position_s &global_position);
 	bool checkAll(const vehicle_global_position_s &global_position, float baro_altitude_amsl);
@@ -211,4 +236,14 @@ private:
 	 * @return true if within polygon the circle
 	 */
 	bool insideCircle(const PolygonInfo &polygon, double lat, double lon, float altitude);
+
+	DEFINE_PARAMETERS(
+		(ParamInt<px4::params::GF_ACTION>)         _param_gf_action,
+		(ParamInt<px4::params::GF_ALTMODE>)        _param_gf_altmode,
+		(ParamInt<px4::params::GF_SOURCE>)         _param_gf_source,
+		(ParamInt<px4::params::GF_COUNT>)          _param_gf_count,
+		(ParamFloat<px4::params::GF_MAX_HOR_DIST>) _param_gf_max_hor_dist,
+		(ParamFloat<px4::params::GF_MAX_VER_DIST>) _param_gf_max_ver_dist,
+		(ParamBool<px4::params::GF_PREDICT>)       _param_gf_predict
+	)
 };

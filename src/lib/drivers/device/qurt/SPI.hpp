@@ -41,7 +41,13 @@
 
 #include "../CDev.hpp"
 
-#include "dev_fs_lib_spi.h"
+// #include "dev_fs_lib_spi.h"
+
+#include <px4_platform_common/spi.h>
+
+// Perhaps not the best place for these but they are only used for the IMU SPI driver on Qurt
+int px4_arch_gpiosetevent(spi_drdy_gpio_t pin, bool r, bool f, bool e, int (*func)(int, void *, void *), void *arg);
+void register_interrupt_callback_initalizer(int (*)(int (*)(int, void *, void *), void *arg));
 
 enum spi_mode_e {
 	SPIDEV_MODE0 = 0, /* CPOL=0 CHPHA=0 */
@@ -49,6 +55,8 @@ enum spi_mode_e {
 	SPIDEV_MODE2 = 2, /* CPOL=1 CHPHA=0 */
 	SPIDEV_MODE3 = 3  /* CPOL=1 CHPHA=1 */
 };
+
+struct I2CSPIDriverConfig;
 
 namespace device __EXPORT
 {
@@ -58,6 +66,17 @@ namespace device __EXPORT
  */
 class __EXPORT SPI : public CDev
 {
+public:
+	typedef int (*_config_spi_bus_func_t)();
+	typedef int (*_spi_transfer_func_t)(int, const uint8_t *, uint8_t *, const unsigned);
+
+	static void configure_callbacks(_config_spi_bus_func_t config_func,
+					_spi_transfer_func_t transfer_func)
+	{
+		_config_spi_bus = config_func;
+		_spi_transfer = transfer_func;
+	}
+
 protected:
 	/**
 	 * Constructor
@@ -70,6 +89,9 @@ protected:
 	 * @param frequency	SPI clock frequency
 	 */
 	SPI(uint8_t device_type, const char *name, int bus, uint32_t device, enum spi_mode_e mode, uint32_t frequency);
+
+	SPI(const I2CSPIDriverConfig &config);
+
 	virtual ~SPI();
 
 	/**
@@ -139,8 +161,8 @@ protected:
 	 *
 	 * @param frequency	Frequency to set (Hz)
 	 */
-	void		set_frequency(uint32_t frequency) { _frequency = frequency; }
-	uint32_t	get_frequency() { return _frequency; }
+	void		set_frequency(uint32_t frequency) {}
+	uint32_t	get_frequency() { return 0; }
 
 	/**
 	 * Set the SPI bus locking mode
@@ -155,13 +177,21 @@ protected:
 private:
 	int 			_fd{-1};
 
-	uint32_t		_device;
-	enum spi_mode_e		_mode;
-	uint32_t		_frequency;
+	static _config_spi_bus_func_t  _config_spi_bus;
+	static _spi_transfer_func_t    _spi_transfer;
+
+	static pthread_mutex_t         _mutex;
 
 protected:
 
-	bool	external() { return px4_spi_bus_external(get_device_bus()); }
+	/**
+	 * The number of times a read or write operation will be retried on
+	 * error.
+	 */
+	uint8_t		_retries{0};
+
+	// bool	external() { return px4_spi_bus_external(get_device_bus()); }
+	// bool	external() { return false; }
 
 };
 

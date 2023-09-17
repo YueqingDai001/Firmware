@@ -92,15 +92,9 @@
 	 (1 << ADC_BATTERY_CURRENT_CHANNEL)       | \
 	 (1 << ADC_RSSI_IN_CHANNEL))
 
-/* Define Battery 1 Voltage Divider and A per V
- */
-#define BOARD_BATTERY1_V_DIV         (10.9f)
-#define BOARD_BATTERY1_A_PER_V       (17.f)
-
 /* PWM
  */
 #define DIRECT_PWM_OUTPUT_CHANNELS  6
-#define DIRECT_INPUT_TIMER_CHANNELS  6
 
 /* Tone alarm output */
 #define GPIO_TONE_ALARM_IDLE    /* PD15 */ (GPIO_OUTPUT|GPIO_PUSHPULL|GPIO_SPEED_2MHz|GPIO_OUTPUT_CLEAR|GPIO_PORTD|GPIO_PIN15)
@@ -119,10 +113,10 @@
 /* RC Serial port */
 
 #define RC_SERIAL_PORT                     "/dev/ttyS4"
+#define RC_SERIAL_SINGLEWIRE
 
 #define GPIO_RSSI_IN                       /* PC5  */ (GPIO_INPUT|GPIO_PULLUP|GPIO_PORTC|GPIO_PIN5)
 
-#define BOARD_HAS_PWM  DIRECT_PWM_OUTPUT_CHANNELS
 
 /* This board provides a DMA pool and APIs */
 #define BOARD_DMA_ALLOC_POOL_SIZE 5120

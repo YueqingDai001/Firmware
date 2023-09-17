@@ -90,6 +90,12 @@
 #define BOARD_LED_G_BIT   (1 << BOARD_LED_G)
 #define BOARD_LED_B_BIT   (1 << BOARD_LED_B)
 
+/* Board revision detection pin
+ * 0 equals UCANS32K146-01
+ * 1 equals UCANS32K146B
+ */
+#define BOARD_REVISION_DETECT_PIN  (GPIO_INPUT | PIN_PORTA | PIN10 )
+
 /* If CONFIG_ARCH_LEDs is defined, then NuttX will control the LEDs on board
  * the UCANS32K146.  The following definitions describe how NuttX
  * controls the LEDs:
@@ -130,7 +136,7 @@
  */
 
 #define PIN_LPUART0_CTS   PIN_LPUART0_CTS_2 /* PTC8 */
-#define PIN_LPUART0_RTS   PIN_LPUART0_RTS_2 /* PTC9 */
+#define PIN_LPUART0_RTS   (GPIO_OUTPUT | PIN_PORTC | PIN9 ) // PIN_LPUART0_RTS_2 /* PTC9 */
 #define PIN_LPUART0_RX    PIN_LPUART0_RX_1  /* PTB0 */
 #define PIN_LPUART0_TX    PIN_LPUART0_TX_1  /* PTB1 */
 
@@ -152,11 +158,38 @@
 /* CAN selections ***********************************************************/
 #define PIN_CAN0_TX      PIN_CAN0_TX_4      /* PTE5 */
 #define PIN_CAN0_RX      PIN_CAN0_RX_4      /* PTE4 */
-#define PIN_CAN0_ENABLE  (GPIO_OUTPUT | PIN_PORTE | PIN11 )
-#define CAN0_ENABLE_OUT  0
+#define PIN_CAN0_STB     (GPIO_OUTPUT | PIN_PORTE | PIN11 )
+#define PIN_CAN0_ERRN    (GPIO_INPUT  | PIN_PORTA | PIN11 )
+#define PIN_CAN0_EN      (GPIO_HIGHDRIVE  | PIN_PORTA | PIN10 )
 #define PIN_CAN1_TX      PIN_CAN1_TX_1      /* PTA13 */
 #define PIN_CAN1_RX      PIN_CAN1_RX_1      /* PTA12 */
-#define PIN_CAN1_ENABLE  (GPIO_OUTPUT | PIN_PORTE | PIN10 )
-#define CAN1_ENABLE_OUT  0
+#define PIN_CAN1_STB     (GPIO_OUTPUT | PIN_PORTE | PIN10 )
+#define PIN_CAN1_ERRN    (GPIO_PULLDOWN  | PIN_PORTE | PIN6 )
+#define PIN_CAN1_EN      (GPIO_OUTPUT  | PIN_PORTE | PIN2 )
+
+/* Board provides GPIO or other Hardware for signaling to timing analyzer */
+
+#if defined(CONFIG_BOARD_USE_PROBES)
+# include "s32k1xx_pin.h"
+# include "hardware/s32k1xx_pinmux.h"
+# define PROBE_N(n) (1<<((n)-1))
+# define PROBE_1    (PIN_PTE0  | GPIO_OUTPUT)  /* 6-wr-SPI_RDY_N */
+# define PROBE_2    (PIN_PTE9  | GPIO_OUTPUT)  /* 6-wr-SPI_INT_N */
+# define PROBE_3    (PIN_PTB5  | GPIO_OUTPUT)  /* 6-wr-SPI_CS_N */
+
+# define PROBE_INIT(mask) \
+	do { \
+		if ((mask)& PROBE_N(1)) { s32k1xx_pinconfig(PROBE_1); } \
+		if ((mask)& PROBE_N(2)) { s32k1xx_pinconfig(PROBE_2); } \
+		if ((mask)& PROBE_N(3)) { s32k1xx_pinconfig(PROBE_3); } \
+	} while(0)
+
+# define PROBE(n,s)  do {s32k1xx_gpiowrite(PROBE_##n,(s));}while(0)
+# define PROBE_MARK(n) PROBE(n,false);PROBE(n,true)
+#else
+# define PROBE_INIT(mask)
+# define PROBE(n,s)
+# define PROBE_MARK(n)
+#endif
 
 #endif  /* __BOARDS_ARM_RDDRONE_UAVCAN146_INCLUDE_BOARD_H */

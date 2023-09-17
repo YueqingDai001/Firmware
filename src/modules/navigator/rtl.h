@@ -46,18 +46,29 @@
 #include "navigator_mode.h"
 #include "mission_block.h"
 
+#include <uORB/Subscription.hpp>
 #include <uORB/topics/home_position.h>
+#include <uORB/topics/rtl_time_estimate.h>
+#include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/wind.h>
+#include <matrix/math.hpp>
+#include <lib/geo/geo.h>
+#include <dataman_client/DatamanClient.hpp>
 
 class Navigator;
 
 class RTL : public MissionBlock, public ModuleParams
 {
 public:
+	RTL(Navigator *navigator);
+
+	~RTL() = default;
+
 	enum RTLType {
-		RTL_HOME = 0,
-		RTL_LAND,
-		RTL_MISSION,
-		RTL_CLOSEST,
+		RTL_TYPE_HOME_OR_RALLY = 0,
+		RTL_TYPE_MISSION_LANDING,
+		RTL_TYPE_MISSION_LANDING_REVERSED,
+		RTL_TYPE_CLOSEST,
 	};
 
 	enum RTLDestinationType {
@@ -66,9 +77,29 @@ public:
 		RTL_DESTINATION_SAFE_POINT,
 	};
 
-	RTL(Navigator *navigator);
+	enum RTLHeadingMode {
+		RTL_NAVIGATION_HEADING = 0,
+		RTL_DESTINATION_HEADING,
+		RTL_CURRENT_HEADING,
+	};
 
-	~RTL() = default;
+	enum RTLState {
+		RTL_STATE_NONE = 0,
+		RTL_STATE_CLIMB,
+		RTL_STATE_RETURN,
+		RTL_STATE_DESCEND,
+		RTL_STATE_LOITER,
+		RTL_STATE_TRANSITION_TO_MC,
+		RTL_MOVE_TO_LAND_HOVER_VTOL,
+		RTL_STATE_LAND,
+		RTL_STATE_LANDED,
+		RTL_STATE_HEAD_TO_CENTER,
+	};
+
+	/**
+	 * @brief function to call regularly to do background work
+	 */
+	void run();
 
 	void on_inactivation() override;
 	void on_inactive() override;
@@ -79,41 +110,48 @@ public:
 
 	void set_return_alt_min(bool min) { _rtl_alt_min = min; }
 
-	int rtl_type() const { return _param_rtl_type.get(); }
+	int get_rtl_type() const { return _param_rtl_type.get(); }
 
-	int rtl_destination();
+	void get_rtl_xy_z_speed(float &xy, float &z);
 
-	void setClimbAndReturnDone(bool done) { _climb_and_return_done = done; }
+	matrix::Vector2f get_wind();
 
-	bool getClimbAndReturnDone() { return _climb_and_return_done; }
+	RTLState getRTLState() { return _rtl_state; }
 
-	bool denyMissionLanding() { return _deny_mission_landing; }
+	bool getRTLDestinationTypeMission() { return _destination.type == RTLDestinationType::RTL_DESTINATION_MISSION_LANDING; }
+
+	void resetRtlState() { _rtl_state = RTL_STATE_NONE; }
+
+	void updateSafePoints() { _initiate_safe_points_updated = true; }
 
 private:
-	/**
-	 * Set the RTL item
-	 */
+
 	void set_rtl_item();
 
-	/**
-	 * Move to next RTL item
-	 */
 	void advance_rtl();
 
-
 	float calculate_return_alt_from_cone_half_angle(float cone_half_angle_deg);
+	void calcRtlTimeEstimate(const RTLState rtl_state, rtl_time_estimate_s &rtl_time_estimate);
 
-	enum RTLState {
-		RTL_STATE_NONE = 0,
-		RTL_STATE_CLIMB,
-		RTL_STATE_RETURN,
-		RTL_STATE_TRANSITION_TO_MC,
-		RTL_STATE_DESCEND,
-		RTL_STATE_LOITER,
-		RTL_MOVE_TO_LAND_HOVER_VTOL,
-		RTL_STATE_LAND,
-		RTL_STATE_LANDED,
-	} _rtl_state{RTL_STATE_NONE};
+	float getCruiseGroundSpeed();
+
+	float getClimbRate();
+
+	float getDescendRate();
+
+	float getCruiseSpeed();
+
+	float getHoverLandSpeed();
+
+	RTLState _rtl_state{RTL_STATE_NONE};
+
+	enum class DatamanState {
+		UpdateRequestWait,
+		Read,
+		ReadWait,
+		Load,
+		Error
+	};
 
 	struct RTLPosition {
 		double lat;
@@ -134,22 +172,52 @@ private:
 		}
 	};
 
+	DatamanState _dataman_state{DatamanState::UpdateRequestWait};
+	DatamanState _error_state{DatamanState::UpdateRequestWait};
+	uint16_t _update_counter{0}; ///< dataman update counter: if it does not match, safe points data was updated
+	bool _safe_points_updated{false}; ///< flag indicating if safe points are updated to dataman cache
+	DatamanCache _dataman_cache{"rtl_dm_cache_miss", 4};
+	DatamanClient	&_dataman_client = _dataman_cache.client();
+	bool _initiate_safe_points_updated{true}; ///< flag indicating if safe points update is needed
+
+	mission_stats_entry_s _stats;
+
 	RTLPosition _destination{}; ///< the RTL position to fly to (typically the home position or a safe point)
 
 	hrt_abstime _destination_check_time{0};
 
 	float _rtl_alt{0.0f};	// AMSL altitude at which the vehicle should return to the home position
+
 	bool _rtl_alt_min{false};
-	bool _climb_and_return_done{false};	// this flag is set to true if RTL is active and we are past the climb state and return state
-	bool _deny_mission_landing{false};
 
 	DEFINE_PARAMETERS(
-		(ParamFloat<px4::params::RTL_RETURN_ALT>) _param_rtl_return_alt,
+		(ParamFloat<px4::params::RTL_RETURN_ALT>)  _param_rtl_return_alt,
 		(ParamFloat<px4::params::RTL_DESCEND_ALT>) _param_rtl_descend_alt,
-		(ParamFloat<px4::params::RTL_LAND_DELAY>) _param_rtl_land_delay,
-		(ParamFloat<px4::params::RTL_MIN_DIST>) _param_rtl_min_dist,
-		(ParamInt<px4::params::RTL_TYPE>) _param_rtl_type,
-		(ParamInt<px4::params::RTL_CONE_ANG>) _param_rtl_cone_half_angle_deg,
-		(ParamInt<px4::params::RTL_PLD_MD>) _param_rtl_pld_md
+		(ParamFloat<px4::params::RTL_LAND_DELAY>)  _param_rtl_land_delay,
+		(ParamFloat<px4::params::RTL_MIN_DIST>)    _param_rtl_min_dist,
+		(ParamInt<px4::params::RTL_TYPE>)          _param_rtl_type,
+		(ParamInt<px4::params::RTL_CONE_ANG>)      _param_rtl_cone_half_angle_deg,
+		(ParamInt<px4::params::RTL_PLD_MD>)        _param_rtl_pld_md,
+		(ParamFloat<px4::params::RTL_LOITER_RAD>)  _param_rtl_loiter_rad,
+		(ParamInt<px4::params::RTL_HDG_MD>)        _param_rtl_hdg_md,
+		(ParamFloat<px4::params::RTL_TIME_FACTOR>) _param_rtl_time_factor,
+		(ParamInt<px4::params::RTL_TIME_MARGIN>)   _param_rtl_time_margin
 	)
+
+	param_t		_param_mpc_z_v_auto_up{PARAM_INVALID};
+	param_t		_param_mpc_z_v_auto_dn{PARAM_INVALID};
+	param_t		_param_mpc_land_speed{PARAM_INVALID};
+	param_t		_param_fw_climb_rate{PARAM_INVALID};
+	param_t		_param_fw_sink_rate{PARAM_INVALID};
+
+	param_t 	_param_fw_airspeed_trim{PARAM_INVALID};
+	param_t 	_param_mpc_xy_cruise{PARAM_INVALID};
+	param_t 	_param_rover_cruise_speed{PARAM_INVALID};
+
+	uORB::SubscriptionData<wind_s>		_wind_sub{ORB_ID(wind)};
+	uORB::Publication<rtl_time_estimate_s> _rtl_time_estimate_pub{ORB_ID(rtl_time_estimate)};
 };
+
+float time_to_home(const matrix::Vector3f &to_home_vec,
+		   const matrix::Vector2f &wind_velocity, float vehicle_speed_m_s,
+		   float vehicle_descent_speed_m_s);

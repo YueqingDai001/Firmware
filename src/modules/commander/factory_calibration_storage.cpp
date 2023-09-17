@@ -43,33 +43,64 @@
 
 static const char *CALIBRATION_STORAGE = "/fs/mtd_caldata";
 
+enum class FactoryCalibrationMode : uint32_t {
+	Disabled = 0,
+	AllSensors,
+	AllSensorsExceptMag,
+};
+
+static bool ends_with(const char *str, const char *suffix)
+{
+	if (!str || !suffix) {
+		return false;
+	}
+
+	size_t len_str = strlen(str);
+	size_t len_suffix = strlen(suffix);
+
+	if (len_suffix > len_str) {
+		return false;
+	}
+
+	return strncmp(str + len_str - len_suffix, suffix, len_suffix) == 0;
+}
+
+static FactoryCalibrationMode factory_calibration_mode{FactoryCalibrationMode::Disabled};
+
 static bool filter_calibration_params(param_t handle)
 {
 	const char *name = param_name(handle);
+
+	if (factory_calibration_mode == FactoryCalibrationMode::AllSensorsExceptMag) {
+		if (strncmp(name, "CAL_MAG", 7) == 0) {
+			return false;
+		}
+	}
+
 	// filter all non-calibration params
-	return strncmp(name, "CAL_", 4) == 0 || strncmp(name, "TC_", 3) == 0;
+	return (strncmp(name, "CAL_", 4) == 0
+		&& strcmp(name, "CAL_MAG_SIDES") != 0
+		&& !ends_with(name, "_PRIO"))
+	       || strncmp(name, "TC_", 3) == 0;
 }
 
 FactoryCalibrationStorage::FactoryCalibrationStorage()
 {
 	int32_t param = 0;
 	param_get(param_find("SYS_FAC_CAL_MODE"), &param);
-	_enabled = param == 1;
+	_enabled = param >= 1;
+	factory_calibration_mode = (FactoryCalibrationMode)param;
 }
 
 int FactoryCalibrationStorage::open()
 {
-	if (_fd >= 0) {
-		cleanup();
-	}
-
 	if (!_enabled) {
 		return 0;
 	}
 
-	_fd = ::open(CALIBRATION_STORAGE, O_RDWR);
+	int ret = ::access(CALIBRATION_STORAGE, R_OK | W_OK);
 
-	if (_fd == -1) {
+	if (ret != 0) {
 		return -errno;
 	}
 
@@ -84,7 +115,7 @@ int FactoryCalibrationStorage::store()
 		return 0;
 	}
 
-	int ret = param_export(_fd, false, filter_calibration_params);
+	int ret = param_export(CALIBRATION_STORAGE, filter_calibration_params);
 
 	if (ret != 0) {
 		PX4_ERR("param export failed (%i)", ret);
@@ -97,11 +128,6 @@ void FactoryCalibrationStorage::cleanup()
 {
 	if (_enabled) {
 		param_control_autosave(true);
-	}
-
-	if (_fd >= 0) {
-		close(_fd);
-		_fd = -1;
 	}
 }
 

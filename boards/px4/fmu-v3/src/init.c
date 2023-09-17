@@ -53,6 +53,7 @@
 #include <string.h>
 #include <debug.h>
 #include <errno.h>
+#include <syslog.h>
 
 #include <nuttx/board.h>
 #include <nuttx/spi/spi.h>
@@ -160,12 +161,12 @@ __EXPORT void board_on_reset(int status)
 		up_mdelay(400);
 
 		/* on reboot (status >= 0) reset sensors and peripherals */
-		board_spi_reset(10, 0xffff);
+		board_control_spi_sensors_power(false, 0xffff);
 	}
 }
 
 /************************************************************************************
-  * Name: determin_hw_version
+  * Name: determine_hw_info
  *
  * Description:
  *
@@ -187,7 +188,10 @@ __EXPORT void board_on_reset(int status)
  *  10   10 - 0xA PixhawkMini
  *  10   11 - 0xB FMUv2 questionable hardware (should be treated like regular FMUv2)
  *
- *  This will return OK on success and -1 on not supported
+ *  This will return OK on success.
+ *
+ *  If PB12 is not returning a consistent result we assume that it's a Cube Black
+ *  with something connected to CAN1 and talking to it.
  *
  *  hw_type Initial state is {'V','2',0, 0}
  *   V 2    - FMUv2
@@ -197,19 +201,18 @@ __EXPORT void board_on_reset(int status)
  *
  ************************************************************************************/
 
-static int determin_hw_version(int *version, int *revision)
+static int determine_hw_info(int *revision, int *version)
 {
 	*revision = 0; /* default revision */
-	int rv = 0;
 	int pos = 0;
 	stm32_configgpio(GPIO_PULLDOWN | (HW_VER_PB4 & ~GPIO_PUPD_MASK));
 	up_udelay(10);
-	rv |= stm32_gpioread(HW_VER_PB4) << pos++;
+	*version |= stm32_gpioread(HW_VER_PB4) << pos++;
 	stm32_configgpio(HW_VER_PB4);
 	up_udelay(10);
-	rv |= stm32_gpioread(HW_VER_PB4) << pos++;
+	*version |= stm32_gpioread(HW_VER_PB4) << pos++;
 
-	int votes = 16;
+	int votes = 100;
 	int ones[2] = {0, 0};
 	int zeros[2] = {0, 0};
 
@@ -222,19 +225,31 @@ static int determin_hw_version(int *version, int *revision)
 		stm32_gpioread(HW_VER_PB12) ? ones[1]++ : zeros[1]++;
 	}
 
-	if (ones[0] > zeros[0]) {
-		rv |= 1 << pos;
-	}
+	const int margin = 50;
+	// On Cube the detection does not work as expected when something
+	// is connected to CAN1. In that case, there is no clear winner
+	// between ones and zeros.
 
-	pos++;
+	if (*version == 0x2 && abs(ones[0] - zeros[0]) < margin && abs(ones[1] - zeros[1]) < margin) {
+		*version = HW_VER_FMUV3_STATE;
+		syslog(LOG_DEBUG, "Ambiguous board detection, assuming Pixhawk Cube\n");
 
-	if (ones[1] > zeros[1]) {
-		rv |= 1 << pos;
+	} else {
+
+		if (ones[0] > zeros[0]) {
+			*version |= 1 << pos;
+		}
+
+		pos++;
+
+		if (ones[1] > zeros[1] + margin) {
+			*version |= 1 << pos;
+		}
 	}
 
 	stm32_configgpio(HW_VER_PB4_INIT);
 	stm32_configgpio(HW_VER_PB12_INIT);
-	*version = rv;
+
 	return OK;
 }
 
@@ -365,7 +380,7 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	/* Ensure the power is on 1 ms before we drive the GPIO pins */
 	usleep(1000);
 
-	if (OK == determin_hw_version(&hw_version, & hw_revision)) {
+	if (OK == determine_hw_info(&hw_revision, &hw_version)) {
 		switch (hw_version) {
 		case HW_VER_FMUV2_STATE:
 			break;
@@ -431,22 +446,11 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 		syslog(LOG_ERR, "DMA alloc FAILED\n");
 	}
 
-	/* set up the serial DMA polling */
+#if defined(SERIAL_HAVE_RXDMA)
+	// set up the serial DMA polling at 1ms intervals for received bytes that have not triggered a DMA event.
 	static struct hrt_call serial_dma_call;
-	struct timespec ts;
-
-	/*
-	 * Poll at 1ms intervals for received bytes that have not triggered
-	 * a DMA event.
-	 */
-	ts.tv_sec = 0;
-	ts.tv_nsec = 1000000;
-
-	hrt_call_every(&serial_dma_call,
-		       ts_to_abstime(&ts),
-		       ts_to_abstime(&ts),
-		       (hrt_callout)stm32_serial_dma_poll,
-		       NULL);
+	hrt_call_every(&serial_dma_call, 1000, 1000, (hrt_callout)stm32_serial_dma_poll, NULL);
+#endif
 
 	/* initial LED state */
 	drv_led_start();
@@ -463,7 +467,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (!spi1) {
 		syslog(LOG_ERR, "[boot] FAILED to initialize SPI port %d\n", 1);
 		led_on(LED_AMBER);
-		return -ENODEV;
 	}
 
 	/* Default SPI1 to 1MHz and de-assert the known chip selects. */
@@ -479,7 +482,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (!spi2) {
 		syslog(LOG_ERR, "[boot] FAILED to initialize SPI port %d\n", 2);
 		led_on(LED_AMBER);
-		return -ENODEV;
 	}
 
 	/* Default SPI2 to 37.5 MHz (40 MHz rounded to nearest valid divider, F4 max)
@@ -495,7 +497,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (!spi4) {
 		syslog(LOG_ERR, "[boot] FAILED to initialize SPI port %d\n", 4);
 		led_on(LED_AMBER);
-		return -ENODEV;
 	}
 
 	/* Default SPI4 to 1MHz and de-assert the known chip selects. */
@@ -511,7 +512,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (!sdio) {
 		led_on(LED_AMBER);
 		syslog(LOG_ERR, "[boot] Failed to initialize SDIO slot %d\n", CONFIG_NSH_MMCSDSLOTNO);
-		return -ENODEV;
 	}
 
 	/* Now bind the SDIO interface to the MMC/SD driver */
@@ -520,7 +520,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (ret != OK) {
 		led_on(LED_AMBER);
 		syslog(LOG_ERR, "[boot] Failed to bind SDIO to the MMC/SD driver: %d\n", ret);
-		return ret;
 	}
 
 	/* Then let's guess and say that there is a card in the slot. There is no card detect GPIO. */
@@ -529,7 +528,6 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 #endif
 
 	/* Configure the HW based on the manifest */
-
 	px4_platform_configure();
 
 	return OK;

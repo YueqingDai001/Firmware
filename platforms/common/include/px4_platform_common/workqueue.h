@@ -43,11 +43,7 @@
 
 #include <stdint.h>
 #include <queue.h>
-#include <px4_platform_types.h>
-
-#ifdef __PX4_QURT
-#include <dspal_types.h>
-#endif
+#include <sys/types.h>
 
 __BEGIN_DECLS
 

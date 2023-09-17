@@ -68,7 +68,7 @@ TEST_F(ObstacleAvoidanceTest, instantiation) { ObstacleAvoidance oa(nullptr); }
 
 TEST_F(ObstacleAvoidanceTest, oa_enabled_healthy)
 {
-	// GIVEN: the flight controller setpoints from FlightTaskAutoMapper and a vehicle_trajectory_waypoint message coming
+	// GIVEN: the flight controller setpoints from FlightTaskAuto and a vehicle_trajectory_waypoint message coming
 	// from offboard
 	TestObstacleAvoidance oa;
 
@@ -104,7 +104,7 @@ TEST_F(ObstacleAvoidanceTest, oa_enabled_healthy)
 
 TEST_F(ObstacleAvoidanceTest, oa_enabled_healthy_bezier)
 {
-	// GIVEN: the flight controller setpoints from FlightTaskAutoMapper and a vehicle_trajectory_waypoint message coming
+	// GIVEN: the flight controller setpoints from FlightTaskAuto and a vehicle_trajectory_waypoint message coming
 	// from offboard
 	TestObstacleAvoidance oa;
 
@@ -147,7 +147,7 @@ TEST_F(ObstacleAvoidanceTest, oa_enabled_healthy_bezier)
 
 TEST_F(ObstacleAvoidanceTest, oa_enabled_not_healthy)
 {
-	// GIVEN: the flight controller setpoints from FlightTaskAutoMapper and a vehicle_trajectory_waypoint message
+	// GIVEN: the flight controller setpoints from FlightTaskAuto and a vehicle_trajectory_waypoint message
 	TestObstacleAvoidance oa;
 
 	vehicle_trajectory_waypoint_s message = empty_trajectory_waypoint;
@@ -177,7 +177,7 @@ TEST_F(ObstacleAvoidanceTest, oa_enabled_not_healthy)
 
 TEST_F(ObstacleAvoidanceTest, oa_desired)
 {
-	// GIVEN: the flight controller setpoints from FlightTaskAutoMapper and the waypoints from FLightTaskAuto
+	// GIVEN: the flight controller setpoints from FlightTaskAuto and the waypoints from FLightTaskAuto
 	TestObstacleAvoidance oa;
 
 	pos_sp = Vector3f(1.f, 1.2f, NAN);
@@ -198,7 +198,6 @@ TEST_F(ObstacleAvoidanceTest, oa_desired)
 
 	// WHEN: we subscribe to the uORB message out of the interface
 	uORB::SubscriptionData<vehicle_trajectory_waypoint_s> _sub_traj_wp_avoidance_desired{ORB_ID(vehicle_trajectory_waypoint_desired)};
-	_sub_traj_wp_avoidance_desired.update();
 
 	// THEN: we expect the setpoints in POINT_0 and waypoints in POINT_1 and POINT_2
 	EXPECT_FLOAT_EQ(pos_sp(0),

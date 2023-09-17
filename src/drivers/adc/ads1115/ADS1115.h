@@ -37,7 +37,7 @@
 #include <drivers/device/i2c.h>
 #include <px4_platform_common/i2c_spi_buses.h>
 #include <uORB/topics/adc_report.h>
-#include <uORB/Publication.hpp>
+#include <uORB/PublicationMulti.hpp>
 #include <lib/perf/perf_counter.h>
 #include <drivers/drv_hrt.h>
 
@@ -93,6 +93,9 @@
 #define CONFIG_LOW_COMP_QU_AFTER4    0x02
 #define CONFIG_LOW_COMP_QU_DISABLE    0x03
 
+#define CONFIG_RESET_VALUE_HIGH 0x85
+#define CONFIG_RESET_VALUE_LOW 0x83
+
 using namespace time_literals;
 
 /*
@@ -105,23 +108,18 @@ using namespace time_literals;
 class ADS1115 : public device::I2C, public I2CSPIDriver<ADS1115>
 {
 public:
-	ADS1115(I2CSPIBusOption bus_option, int bus, int addr, int bus_frequency);
+	ADS1115(const I2CSPIDriverConfig &config);
 	~ADS1115() override;
 
-	int Begin();
-
 	int init() override;
-
-	static I2CSPIDriverBase *instantiate(const BusCLIArguments &cli, const BusInstanceIterator &iterator,
-					     int runtime_instance);
 
 	static void print_usage();
 
 	void RunImpl();
 
-protected:
+	int probe() override;
 
-	adc_report_s _adc_report = {};
+protected:
 
 	void print_status() override;
 
@@ -129,13 +127,17 @@ protected:
 
 private:
 
-	uORB::Publication<adc_report_s>		_to_adc_report{ORB_ID(adc_report)};
+	uORB::PublicationMulti<adc_report_s>		_to_adc_report{ORB_ID(adc_report)};
 
 	static const hrt_abstime	SAMPLE_INTERVAL{50_ms};
 
+	adc_report_s _adc_report{};
+
 	perf_counter_t			_cycle_perf;
 
-	int     _channel_cycle_count = 0;
+	int     _channel_cycle_count{0};
+
+	bool    _reported_ready_last_cycle{false};
 
 	// ADS1115 logic part
 	enum ChannelSelection {

@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2016 PX4 Development Team. All rights reserved.
+ * Copyright (C) 2022 ModalAI, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,13 +31,6 @@
  *
  ****************************************************************************/
 
-/**
- * @file qshell.h
- * Send shell commands to qurt
- *
- * @author Nicolas de Palezieux <ndepal@gmail.com>
- */
-
 #pragma once
 
 #include <px4_platform_common/app.h>
@@ -65,7 +58,7 @@ private:
 
 	uORB::Publication<qshell_req_s>	_qshell_req_pub{ORB_ID(qshell_req)};
 
-	uORB::Subscription		_qshell_retval_sub{ORB_ID(qshell_retval)};
+	static uORB::Subscription	*_qshell_retval_sub;
 
-	uint32_t			_current_sequence{0};
+	static uint32_t			_current_sequence;
 };

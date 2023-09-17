@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2013-2018 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2013-2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -50,15 +50,16 @@
 
 #include <string.h>
 #include <drivers/drv_hrt.h>
-#include <dataman/dataman.h>
+#include <dataman_client/DatamanClient.hpp>
 #include <systemlib/mavlink_log.h>
 #include <systemlib/err.h>
-#include <lib/ecl/geo/geo.h>
+#include <lib/geo/geo.h>
 #include <navigator/navigation.h>
 #include <uORB/uORB.h>
 #include <uORB/topics/mission.h>
 #include <uORB/topics/mission_result.h>
 #include <drivers/drv_hrt.h>
+#include <px4_platform_common/events.h>
 
 using namespace time_literals;
 
@@ -66,25 +67,63 @@ Mission::Mission(Navigator *navigator) :
 	MissionBlock(navigator),
 	ModuleParams(navigator)
 {
+	mission_init();
+}
+
+void
+Mission::run()
+{
+	if ((_mission.count > 0) && (_current_mission_index != _load_mission_index)) {
+
+		uint32_t start_index = _current_mission_index;
+		uint32_t end_index = start_index + DATAMAN_CACHE_SIZE;
+
+		end_index = math::min(end_index, static_cast<uint32_t>(_mission.count));
+
+		for (uint32_t index = start_index; index < end_index; ++index) {
+
+			_dataman_cache.load(static_cast<dm_item_t>(_mission.dataman_id), index);
+		}
+
+		_load_mission_index = _current_mission_index;
+	}
+
+	_dataman_cache.update();
+}
+
+void Mission::mission_init()
+{
+	// init mission state, do it here to allow navigator to use stored mission even if mavlink failed to start
+
+	if (_dataman_client.readSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&_mission), sizeof(mission_s))) {
+		if ((_mission.timestamp != 0)
+		    && (_mission.dataman_id == DM_KEY_WAYPOINTS_OFFBOARD_0 || _mission.dataman_id == DM_KEY_WAYPOINTS_OFFBOARD_1)) {
+			if (_mission.count > 0) {
+				PX4_INFO("Mission #%" PRIu8 " loaded, %" PRIu16 " WPs", _mission.dataman_id, _mission.count);
+			}
+
+		} else {
+			// initialize mission state in dataman
+			_mission.dataman_id = DM_KEY_WAYPOINTS_OFFBOARD_0;
+			_mission.timestamp = hrt_absolute_time();
+			_dataman_client.writeSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&_mission), sizeof(mission_s));
+		}
+	}
+
+	_current_mission_index = _mission.current_seq;
+
 }
 
 void
 Mission::on_inactive()
 {
-	/* We need to reset the mission cruising speed, otherwise the
-	 * mission velocity which might have been set using mission items
-	 * is used for missions such as RTL. */
-	_navigator->set_cruising_speed();
-
-	// if we were executing an landing but have been inactive for 2 seconds, then make the landing invalid
-	// this prevents RTL to just continue at the current mission index
-	if (_navigator->getMissionLandingInProgress() && (hrt_absolute_time() - _time_mission_deactivated) > 2_s) {
-		_navigator->setMissionLandingInProgress(false);
+	/* Without home a mission can't be valid yet anyway, let's wait. */
+	if (!_navigator->home_global_position_valid()) {
+		return;
 	}
 
-	/* Without home a mission can't be valid yet anyway, let's wait. */
-	if (!_navigator->home_position_valid()) {
-		return;
+	if (_need_mission_save && _navigator->get_vstatus()->arming_state != vehicle_status_s::ARMING_STATE_ARMED) {
+		save_mission_state();
 	}
 
 	if (_inited) {
@@ -99,8 +138,10 @@ Mission::on_inactive()
 		/* reset the current mission if needed */
 		if (need_to_reset_mission()) {
 			reset_mission(_mission);
-			update_mission();
 			_navigator->reset_cruising_speed();
+			_current_mission_index = 0;
+			_navigator->reset_vroi();
+			set_current_mission_item();
 		}
 
 	} else {
@@ -108,14 +149,11 @@ Mission::on_inactive()
 		/* load missions from storage */
 		mission_s mission_state = {};
 
-		dm_lock(DM_KEY_MISSION_STATE);
-
 		/* read current state */
-		int read_res = dm_read(DM_KEY_MISSION_STATE, 0, &mission_state, sizeof(mission_s));
+		bool success = _dataman_client.readSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission_state),
+							sizeof(mission_s));
 
-		dm_unlock(DM_KEY_MISSION_STATE);
-
-		if (read_res == sizeof(mission_s)) {
+		if (success) {
 			_mission.dataman_id = mission_state.dataman_id;
 			_mission.count = mission_state.count;
 			_current_mission_index = mission_state.current_seq;
@@ -145,22 +183,18 @@ Mission::on_inactive()
 void
 Mission::on_inactivation()
 {
-	// Disable camera trigger
-	vehicle_command_s cmd = {};
-	cmd.command = vehicle_command_s::VEHICLE_CMD_DO_TRIGGER_CONTROL;
-	// Pause trigger
-	cmd.param1 = -1.0f;
-	cmd.param3 = 1.0f;
-	_navigator->publish_vehicle_cmd(&cmd);
+	_navigator->disable_camera_trigger();
+	_navigator->stop_capturing_images();
+	_navigator->release_gimbal_control();
 
 	if (_navigator->get_precland()->is_activated()) {
 		_navigator->get_precland()->on_inactivation();
 	}
 
-	_time_mission_deactivated = hrt_absolute_time();
-
 	/* reset so current mission item gets restarted if mission was paused */
 	_work_item_type = WORK_ITEM_TYPE_DEFAULT;
+
+	_inactivation_index = _current_mission_index;
 }
 
 void
@@ -178,15 +212,32 @@ Mission::on_activation()
 	// we already reset the mission items
 	_execution_mode_changed = false;
 
-	set_mission_items();
+	// reset the cache and fill it with the items up to the previous item. The cache contains
+	// commands that are valid for the whole mission, not just a sinlge waypoint.
+	if (_current_mission_index > 0) {
+		resetItemCache();
+		updateCachedItemsUpToIndex(_current_mission_index - 1);
+	}
 
-	// unpause triggering if it was paused
-	vehicle_command_s cmd = {};
-	cmd.command = vehicle_command_s::VEHICLE_CMD_DO_TRIGGER_CONTROL;
-	// unpause trigger
-	cmd.param1 = -1.0f;
-	cmd.param3 = 0.0f;
-	_navigator->publish_vehicle_cmd(&cmd);
+	unsigned resume_index;
+
+	if (_inactivation_index > 0 && cameraWasTriggering()
+	    && getPreviousPositionItemIndex(_mission, _inactivation_index - 1, resume_index)) {
+		// The mission we are resuming had camera triggering enabled. In order to not lose any images
+		// we restart the mission at the previous position item.
+		// We will replay the cached commands once we reach the previous position item and have yaw aligned.
+		set_current_mission_index(resume_index);
+
+		_align_heading_necessary = true;
+
+	} else {
+		set_mission_items();
+	}
+
+	_inactivation_index = -1; // reset
+
+	// reset cruise speed
+	_navigator->reset_cruising_speed();
 }
 
 void
@@ -194,8 +245,8 @@ Mission::on_active()
 {
 	check_mission_valid(false);
 
-	/* check if anything has changed */
-	bool mission_sub_updated = _mission_sub.updated();
+	/* Check if stored mission plan has changed */
+	const bool mission_sub_updated = _mission_sub.updated();
 
 	if (mission_sub_updated) {
 		_navigator->reset_triplets();
@@ -222,8 +273,41 @@ Mission::on_active()
 		set_mission_items();
 	}
 
+	// check if heading alignment is necessary, and add it to the current mission item if necessary
+	if (_align_heading_necessary && is_mission_item_reached_or_completed()) {
+		mission_item_s next_position_mission_item = {};
+
+		// add yaw alignment requirement on the current mission item
+		if (getNextPositionMissionItem(_mission, _current_mission_index + 1, next_position_mission_item)
+		    && !PX4_ISFINITE(_mission_item.yaw)) {
+			_mission_item.yaw = matrix::wrap_pi(get_bearing_to_next_waypoint(_mission_item.lat, _mission_item.lon,
+							    next_position_mission_item.lat, next_position_mission_item.lon));
+			_mission_item.force_heading = true; // note: doesn't have effect in fixed-wing mode
+		}
+
+		mission_apply_limitation(_mission_item);
+		mission_item_to_position_setpoint(_mission_item, &_navigator->get_position_setpoint_triplet()->current);
+
+		reset_mission_item_reached();
+
+		_navigator->set_position_setpoint_triplet_updated();
+		_align_heading_necessary = false;
+	}
+
+	// replay gimbal and camera commands immediately after resuming mission
+	if (haveCachedGimbalOrCameraItems()) {
+		replayCachedGimbalCameraItems();
+	}
+
+	// replay trigger commands upon raching the resume waypoint if the trigger relay flag is set
+	if (cameraWasTriggering() && is_mission_item_reached_or_completed()) {
+		replayCachedTriggerItems();
+	}
+
+	replayCachedSpeedChangeItems();
+
 	/* lets check if we reached the current mission item */
-	if (_mission_type != MISSION_TYPE_NONE && is_mission_item_reached()) {
+	if (_mission_type != MISSION_TYPE_NONE && is_mission_item_reached_or_completed()) {
 		/* If we just completed a takeoff which was inserted before the right waypoint,
 		   there is no need to report that we reached it because we didn't. */
 		if (_work_item_type != WORK_ITEM_TYPE_TAKEOFF) {
@@ -241,11 +325,6 @@ Mission::on_active()
 		if (_waypoint_position_reached && _mission_item.nav_cmd != NAV_CMD_IDLE) {
 			_navigator->set_can_loiter_at_sp(true);
 		}
-	}
-
-	/* check if a cruise speed change has been commanded */
-	if (_mission_type != MISSION_TYPE_NONE) {
-		cruising_speed_sp_update();
 	}
 
 	/* see if we need to update the current yaw heading */
@@ -285,10 +364,17 @@ Mission::on_active()
 bool
 Mission::set_current_mission_index(uint16_t index)
 {
-	if (_navigator->get_mission_result()->valid &&
-	    (index != _current_mission_index) && (index < _mission.count)) {
+	if (index == _current_mission_index) {
+		return true; // nothing to do, so return true
+
+	} else if (_navigator->get_mission_result()->valid && (index < _mission.count)) {
 
 		_current_mission_index = index;
+
+		// we start from the first item so can reset the cache
+		if (_current_mission_index == 0) {
+			resetItemCache();
+		}
 
 		// a mission index is set manually which has the higher priority than the closest mission item
 		// as it is set by the user
@@ -336,7 +422,8 @@ Mission::set_execution_mode(const uint8_t mode)
 
 					position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
 					pos_sp_triplet->previous = pos_sp_triplet->current;
-					generate_waypoint_from_heading(&pos_sp_triplet->current, _mission_item.yaw);
+					// keep current setpoints (FW position controller generates wp to track during transition)
+					pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
 					publish_navigator_mission_item(); // for logging
 					_navigator->set_position_setpoint_triplet_updated();
 					issue_command(_mission_item);
@@ -364,6 +451,7 @@ Mission::set_execution_mode(const uint8_t mode)
 				// handle switch from reverse to forward mission
 				if (_current_mission_index < 0) {
 					_current_mission_index = 0;
+					resetItemCache(); // reset cache as we start from the beginning
 
 				} else if (_current_mission_index < _mission.count - 1) {
 					++_current_mission_index;
@@ -396,10 +484,12 @@ Mission::find_mission_land_start()
 	bool found_land_start_marker = false;
 
 	for (size_t i = 1; i < _mission.count; i++) {
-		const ssize_t len = sizeof(missionitem);
 		missionitem_prev = missionitem; // store the last mission item before reading a new one
 
-		if (dm_read(dm_current, i, &missionitem, len) != len) {
+		bool success = _dataman_client.readSync(dm_current, i, reinterpret_cast<uint8_t *>(&missionitem),
+							sizeof(mission_item_s), 500_ms);
+
+		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
 			PX4_ERR("dataman read failure");
 			break;
@@ -407,17 +497,19 @@ Mission::find_mission_land_start()
 
 		if (missionitem.nav_cmd == NAV_CMD_DO_LAND_START) {
 			found_land_start_marker = true;
-			_land_start_index = i;
 		}
 
-		if (found_land_start_marker && !_land_start_available && i > _land_start_index
-		    && item_contains_position(missionitem)) {
+		if (found_land_start_marker && !_land_start_available && item_contains_position(missionitem)) {
 			// use the position of any waypoint after the land start marker which specifies a position.
 			_landing_start_lat = missionitem.lat;
 			_landing_start_lon = missionitem.lon;
 			_landing_start_alt = missionitem.altitude_is_relative ?	missionitem.altitude +
 					     _navigator->get_home_position()->alt : missionitem.altitude;
+			_landing_loiter_radius = (PX4_ISFINITE(missionitem.loiter_radius)
+						  && fabsf(missionitem.loiter_radius) > FLT_EPSILON) ? fabsf(missionitem.loiter_radius) :
+						 _navigator->get_loiter_radius();
 			_land_start_available = true;
+			_land_start_index = i; // set it to the first item containing a position after the land start marker was found
 		}
 
 		if (((missionitem.nav_cmd == NAV_CMD_VTOL_LAND) && _navigator->get_vstatus()->is_vtol) ||
@@ -448,15 +540,14 @@ Mission::land_start()
 {
 	// if not currently landing, jump to do_land_start
 	if (_land_start_available) {
-		if (_navigator->getMissionLandingInProgress()) {
+		// check if we're currently already in mission mode and on landing part, then simply return true.
+		// note: it's not enough to check landing(), as that is not reset until set_current_mission_index(get_land_start_index())
+		if (_navigator->on_mission_landing()) {
 			return true;
 
 		} else {
 			set_current_mission_index(get_land_start_index());
-
-			const bool can_land_now = landing();
-			_navigator->setMissionLandingInProgress(can_land_now);
-			return can_land_now;
+			return landing();
 		}
 	}
 
@@ -467,10 +558,24 @@ bool
 Mission::landing()
 {
 	// vehicle is currently landing if
-	//  mission valid, still flying, and in the landing portion of mission
+	//  mission valid, still flying, and in the landing portion of mission (past land start marker)
 
 	const bool mission_valid = _navigator->get_mission_result()->valid;
-	const bool on_landing_stage = _land_start_available && (_current_mission_index >= get_land_start_index());
+	bool on_landing_stage = _land_start_available && _current_mission_index > get_land_start_index();
+
+	// special case: if the land start index is at a LOITER_TO_ALT WP, then we're in the landing sequence already when the
+	// distance to the WP is below the loiter radius + acceptance.
+	if (_current_mission_index == get_land_start_index() && _mission_item.nav_cmd == NAV_CMD_LOITER_TO_ALT) {
+		const float d_current = get_distance_to_next_waypoint(_mission_item.lat, _mission_item.lon,
+					_navigator->get_global_position()->lat, _navigator->get_global_position()->lon);
+
+		// consider mission_item.loiter_radius invalid if NAN or 0, use default value in this case.
+		const float mission_item_loiter_radius_abs = (PX4_ISFINITE(_mission_item.loiter_radius)
+				&& fabsf(_mission_item.loiter_radius) > FLT_EPSILON) ? fabsf(_mission_item.loiter_radius) :
+				_navigator->get_loiter_radius();
+
+		on_landing_stage = d_current <= (_navigator->get_acceptance_radius() + mission_item_loiter_radius_abs);
+	}
 
 	return mission_valid && on_landing_stage;
 }
@@ -479,7 +584,10 @@ void
 Mission::update_mission()
 {
 
-	bool failed = true;
+	bool failed = !_navigator->get_mission_result()->valid;
+
+	_dataman_cache.invalidate();
+	_load_mission_index = -1;
 
 	/* Reset vehicle_roi
 	 * Missions that do not explicitly configure ROI would not override
@@ -489,6 +597,14 @@ Mission::update_mission()
 	const mission_s old_mission = _mission;
 
 	if (_mission_sub.copy(&_mission)) {
+
+		bool success = _dataman_client.writeSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&_mission),
+				sizeof(mission_s));
+
+		if (!success) {
+			PX4_ERR("Can't update mission state in Dataman");
+		}
+
 		/* determine current index */
 		if (_mission.current_seq >= 0 && _mission.current_seq < (int)_mission.count) {
 			_current_mission_index = _mission.current_seq;
@@ -506,33 +622,36 @@ Mission::update_mission()
 			/* otherwise, just leave it */
 		}
 
-		check_mission_valid(true);
+		if (old_mission.mission_update_counter != _mission.mission_update_counter) {
+			check_mission_valid(true);
 
-		failed = !_navigator->get_mission_result()->valid;
+			failed = !_navigator->get_mission_result()->valid;
 
-		if (!failed) {
-			/* reset mission failure if we have an updated valid mission */
-			_navigator->get_mission_result()->failure = false;
+			if (!failed) {
+				/* reset mission failure if we have an updated valid mission */
+				_navigator->get_mission_result()->failure = false;
 
-			/* reset sequence info as well */
-			_navigator->get_mission_result()->seq_reached = -1;
-			_navigator->get_mission_result()->seq_total = _mission.count;
+				/* reset sequence info as well */
+				_navigator->get_mission_result()->seq_reached = -1;
+				_navigator->get_mission_result()->seq_total = _mission.count;
 
-			/* reset work item if new mission has been accepted */
-			_work_item_type = WORK_ITEM_TYPE_DEFAULT;
-			_mission_changed = true;
-		}
+				/* reset work item if new mission has been accepted */
+				_work_item_type = WORK_ITEM_TYPE_DEFAULT;
+				_mission_changed = true;
+			}
 
-		/* check if the mission waypoints changed while the vehicle is in air
-		 * TODO add a flag to mission_s which actually tracks if the position of the waypoint changed */
-		if (((_mission.count != old_mission.count) ||
-		     (_mission.dataman_id != old_mission.dataman_id)) &&
-		    !_navigator->get_land_detected()->landed) {
-			_mission_waypoints_changed = true;
+			/* check if the mission waypoints changed while the vehicle is in air
+			 * TODO add a flag to mission_s which actually tracks if the position of the waypoint changed */
+			if (((_mission.count != old_mission.count) ||
+			     (_mission.dataman_id != old_mission.dataman_id)) &&
+			    !_navigator->get_land_detected()->landed) {
+				_mission_waypoints_changed = true;
+			}
 		}
 
 	} else {
 		PX4_ERR("mission update failed");
+		failed = true;
 	}
 
 	if (failed) {
@@ -546,6 +665,14 @@ Mission::update_mission()
 		_mission.current_seq = 0;
 		_current_mission_index = 0;
 	}
+
+	// we start from the first item so can reset the cache
+	if (_current_mission_index == 0) {
+		resetItemCache();
+	}
+
+	// reset as when we update mission we don't want to proceed at previous index
+	_inactivation_index = -1;
 
 	// find and store landing start marker (if available)
 	find_mission_land_start();
@@ -577,9 +704,11 @@ Mission::advance_mission()
 
 				for (int32_t i = _current_mission_index - 1; i >= 0; i--) {
 					struct mission_item_s missionitem = {};
-					const ssize_t len = sizeof(missionitem);
 
-					if (dm_read(dm_current, i, &missionitem, len) != len) {
+					bool success = _dataman_cache.loadWait(dm_current, i, reinterpret_cast<uint8_t *>(&missionitem),
+									       sizeof(mission_item_s), 100_ms);
+
+					if (!success) {
 						/* not supposed to happen unless the datamanager can't access the SD card, etc. */
 						PX4_ERR("dataman read failure");
 						break;
@@ -627,27 +756,48 @@ Mission::set_mission_items()
 		/* if mission type changed, notify */
 		if (_mission_type != MISSION_TYPE_MISSION) {
 			mavlink_log_info(_navigator->get_mavlink_log_pub(),
-					 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Executing Reverse Mission" :
-					 "Executing Mission");
+					 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Executing Reverse Mission\t" :
+					 "Executing Mission\t");
+
+			if (_mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE) {
+				events::send(events::ID("mission_execute_rev"), events::Log::Info, "Executing Reverse Mission");
+
+			} else {
+				events::send(events::ID("mission_execute"), events::Log::Info, "Executing Mission");
+			}
+
 			user_feedback_done = true;
 		}
 
 		_mission_type = MISSION_TYPE_MISSION;
 
 	} else {
-		/* no mission available or mission finished, switch to loiter */
 		if (_mission_type != MISSION_TYPE_NONE) {
 
 			if (_navigator->get_land_detected()->landed) {
 				mavlink_log_info(_navigator->get_mavlink_log_pub(),
-						 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Reverse Mission finished, landed" :
-						 "Mission finished, landed.");
+						 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Reverse Mission finished, landed\t" :
+						 "Mission finished, landed\t");
+
+				if (_mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE) {
+					events::send(events::ID("mission_finished_rev"), events::Log::Info, "Reverse Mission finished, landed");
+
+				} else {
+					events::send(events::ID("mission_finished"), events::Log::Info, "Mission finished, landed");
+				}
 
 			} else {
 				/* https://en.wikipedia.org/wiki/Loiter_(aeronautics) */
 				mavlink_log_info(_navigator->get_mavlink_log_pub(),
-						 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Reverse Mission finished, loitering" :
-						 "Mission finished, loitering.");
+						 _mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE ? "Reverse Mission finished, loitering\t" :
+						 "Mission finished, loitering\t");
+
+				if (_mission_execution_mode == mission_result_s::MISSION_EXECUTION_MODE_REVERSE) {
+					events::send(events::ID("mission_finished_rev_loiter"), events::Log::Info, "Reverse Mission finished, loitering");
+
+				} else {
+					events::send(events::ID("mission_finished_loiter"), events::Log::Info, "Mission finished, loitering");
+				}
 
 				/* use last setpoint for loiter */
 				_navigator->set_can_loiter_at_sp(true);
@@ -658,11 +808,22 @@ Mission::set_mission_items()
 
 		_mission_type = MISSION_TYPE_NONE;
 
-		/* set loiter mission item and ensure that there is a minimum clearance from home */
-		set_loiter_item(&_mission_item, _navigator->get_takeoff_min_alt());
+		position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
+
+		if (_navigator->get_land_detected()->landed) {
+			_mission_item.nav_cmd = NAV_CMD_IDLE;
+
+		} else {
+			if (pos_sp_triplet->current.valid && pos_sp_triplet->current.type == position_setpoint_s::SETPOINT_TYPE_LOITER) {
+				setLoiterItemFromCurrentPositionSetpoint(&_mission_item);
+
+			} else {
+				setLoiterItemFromCurrentPosition(&_mission_item);
+			}
+
+		}
 
 		/* update position setpoint triplet  */
-		position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
 		pos_sp_triplet->previous.valid = false;
 		mission_apply_limitation(_mission_item);
 		mission_item_to_position_setpoint(_mission_item, &pos_sp_triplet->current);
@@ -674,6 +835,7 @@ Mission::set_mission_items()
 		// set mission finished
 		_navigator->get_mission_result()->finished = true;
 		_navigator->set_mission_result_updated();
+		_navigator->mode_completed(vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION);
 
 		if (!user_feedback_done) {
 			/* only tell users that we got no mission if there has not been any
@@ -683,10 +845,14 @@ Mission::set_mission_items()
 
 			if (_navigator->get_land_detected()->landed) {
 				/* landed, refusing to take off without a mission */
-				mavlink_log_critical(_navigator->get_mavlink_log_pub(), "No valid mission available, refusing takeoff.");
+				mavlink_log_critical(_navigator->get_mavlink_log_pub(), "No valid mission available, refusing takeoff\t");
+				events::send(events::ID("mission_not_valid_refuse"), {events::Log::Error, events::LogInternal::Disabled},
+					     "No valid mission available, refusing takeoff");
 
 			} else {
-				mavlink_log_critical(_navigator->get_mavlink_log_pub(), "No valid mission available, loitering.");
+				mavlink_log_critical(_navigator->get_mavlink_log_pub(), "No valid mission available, loitering\t");
+				events::send(events::ID("mission_not_valid_loiter"), {events::Log::Error, events::LogInternal::Disabled},
+					     "No valid mission available, loitering");
 			}
 
 			user_feedback_done = true;
@@ -730,8 +896,10 @@ Mission::set_mission_items()
 
 					float takeoff_alt = calculate_takeoff_altitude(&_mission_item);
 
-					mavlink_log_info(_navigator->get_mavlink_log_pub(), "Takeoff to %.1f meters above home.",
+					mavlink_log_info(_navigator->get_mavlink_log_pub(), "Takeoff to %.1f meters above home\t",
 							 (double)(takeoff_alt - _navigator->get_home_position()->alt));
+					events::send<float>(events::ID("mission_takeoff_to"), events::Log::Info,
+							    "Takeoff to {1:.1m_v} above home", takeoff_alt - _navigator->get_home_position()->alt);
 
 					_mission_item.nav_cmd = NAV_CMD_TAKEOFF;
 					_mission_item.lat = _navigator->get_global_position()->lat;
@@ -752,24 +920,14 @@ Mission::set_mission_items()
 					_mission_item.nav_cmd = NAV_CMD_WAYPOINT;
 					/* ignore yaw here, otherwise it might yaw before heading_sp_update takes over */
 					_mission_item.yaw = NAN;
-					/* since _mission_item.time_inside and and _mission_item.pitch_min build a union, we need to set time_inside to zero
-					 * since in NAV_CMD_TAKEOFF mode there is currently no time_inside.
-					 * Note also that resetting time_inside to zero will cause pitch_min to be zero as well.
-					 */
-					_mission_item.time_inside = 0.0f;
 
 				} else if (_mission_item.nav_cmd == NAV_CMD_VTOL_TAKEOFF
 					   && _work_item_type == WORK_ITEM_TYPE_DEFAULT
 					   && new_work_item_type == WORK_ITEM_TYPE_DEFAULT) {
+					// if the vehicle is already in fixed wing mode then the current mission item
+					// will be accepted immediately and the work items will be skipped
+					_work_item_type = WORK_ITEM_TYPE_TAKEOFF;
 
-					if (_navigator->get_vstatus()->vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING) {
-						/* haven't transitioned yet, trigger vtol takeoff logic below */
-						_work_item_type = WORK_ITEM_TYPE_TAKEOFF;
-
-					} else {
-						/* already in fixed-wing, go to waypoint */
-						_mission_item.nav_cmd = NAV_CMD_WAYPOINT;
-					}
 
 					/* ignore yaw here, otherwise it might yaw before heading_sp_update takes over */
 					_mission_item.yaw = NAN;
@@ -783,10 +941,6 @@ Mission::set_mission_items()
 					_mission_item.nav_cmd = NAV_CMD_WAYPOINT;
 					/* ignore yaw here, otherwise it might yaw before heading_sp_update takes over */
 					_mission_item.yaw = NAN;
-					/* since _mission_item.time_inside and and _mission_item.pitch_min build a union, we need to set time_inside to zero
-					 * since in NAV_CMD_TAKEOFF mode there is currently no time_inside.
-					 */
-					_mission_item.time_inside = 0.0f;
 				}
 
 				/* if we just did a VTOL takeoff, prepare transition */
@@ -824,19 +978,19 @@ Mission::set_mission_items()
 
 					/* check if the vtol_takeoff waypoint is on top of us */
 					if (do_need_move_to_takeoff()) {
-						new_work_item_type = WORK_ITEM_TYPE_TRANSITON_AFTER_TAKEOFF;
+						new_work_item_type = WORK_ITEM_TYPE_TRANSITION_AFTER_TAKEOFF;
 					}
 
 					set_vtol_transition_item(&_mission_item, vtol_vehicle_status_s::VEHICLE_VTOL_STATE_FW);
 					_mission_item.yaw = _navigator->get_local_position()->heading;
 
-					/* set position setpoint to target during the transition */
-					generate_waypoint_from_heading(&pos_sp_triplet->current, _mission_item.yaw);
+					// keep current setpoints (FW position controller generates wp to track during transition)
+					pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
 				}
 
 				/* takeoff completed and transitioned, move to takeoff wp as fixed wing */
 				if (_mission_item.nav_cmd == NAV_CMD_VTOL_TAKEOFF
-				    && _work_item_type == WORK_ITEM_TYPE_TRANSITON_AFTER_TAKEOFF
+				    && _work_item_type == WORK_ITEM_TYPE_TRANSITION_AFTER_TAKEOFF
 				    && new_work_item_type == WORK_ITEM_TYPE_DEFAULT) {
 
 					new_work_item_type = WORK_ITEM_TYPE_DEFAULT;
@@ -847,7 +1001,7 @@ Mission::set_mission_items()
 
 				/* move to land wp as fixed wing */
 				if (_mission_item.nav_cmd == NAV_CMD_VTOL_LAND
-				    && (_work_item_type == WORK_ITEM_TYPE_DEFAULT || _work_item_type == WORK_ITEM_TYPE_TRANSITON_AFTER_TAKEOFF)
+				    && (_work_item_type == WORK_ITEM_TYPE_DEFAULT || _work_item_type == WORK_ITEM_TYPE_TRANSITION_AFTER_TAKEOFF)
 				    && new_work_item_type == WORK_ITEM_TYPE_DEFAULT
 				    && !_navigator->get_land_detected()->landed) {
 
@@ -919,7 +1073,10 @@ Mission::set_mission_items()
 					_mission_item.altitude_is_relative = false;
 					_mission_item.nav_cmd = NAV_CMD_WAYPOINT;
 					_mission_item.autocontinue = true;
-					_mission_item.time_inside = 0.0f;
+
+					// have to reset here because these field were used in set_vtol_transition_item
+					_mission_item.time_inside = 0.f;
+					_mission_item.acceptance_radius = _navigator->get_acceptance_radius();
 
 					// make previous setpoint invalid, such that there will be no prev-current line following.
 					// if the vehicle drifted off the path during back-transition it should just go straight to the landing point
@@ -990,7 +1147,10 @@ Mission::set_mission_items()
 					_mission_item.time_inside = 0.0f;
 
 				} else {
-					mavlink_log_critical(_navigator->get_mavlink_log_pub(), "MissionReverse: Got a non-position mission item, ignoring it");
+					mavlink_log_critical(_navigator->get_mavlink_log_pub(),
+							     "MissionReverse: Got a non-position mission item, ignoring it\t");
+					events::send(events::ID("mission_ignore_non_position_item"), events::Log::Info,
+						     "MissionReverse: Got a non-position mission item, ignoring it");
 				}
 
 				break;
@@ -1033,33 +1193,9 @@ Mission::set_mission_items()
 					/* re-enable weather vane again after alignment */
 					pos_sp_triplet->current.disable_weather_vane = false;
 
-					/* set position setpoint to target during the transition */
 					pos_sp_triplet->previous = pos_sp_triplet->current;
-					generate_waypoint_from_heading(&pos_sp_triplet->current, pos_sp_triplet->current.yaw);
-				}
-
-				/* don't advance mission after FW to MC command */
-				if (_mission_item.nav_cmd == NAV_CMD_DO_VTOL_TRANSITION
-				    && _work_item_type == WORK_ITEM_TYPE_DEFAULT
-				    && new_work_item_type == WORK_ITEM_TYPE_DEFAULT
-				    && _navigator->get_vstatus()->vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING
-				    && !_navigator->get_land_detected()->landed
-				    && pos_sp_triplet->current.valid) {
-
-					new_work_item_type = WORK_ITEM_TYPE_CMD_BEFORE_MOVE;
-				}
-
-				/* after FW to MC transition finish moving to the waypoint */
-				if (_work_item_type == WORK_ITEM_TYPE_CMD_BEFORE_MOVE &&
-				    new_work_item_type == WORK_ITEM_TYPE_DEFAULT
-				    && pos_sp_triplet->current.valid) {
-
-					new_work_item_type = WORK_ITEM_TYPE_DEFAULT;
-
-					_mission_item.nav_cmd = NAV_CMD_WAYPOINT;
-					copy_position_if_valid(&_mission_item, &pos_sp_triplet->current);
-					_mission_item.autocontinue = true;
-					_mission_item.time_inside = 0.0f;
+					// keep current setpoints (FW position controller generates wp to track during transition)
+					pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
 				}
 
 				// ignore certain commands in mission fast forward
@@ -1085,9 +1221,6 @@ Mission::set_mission_items()
 	}
 
 	/*********************************** set setpoints and check next *********************************************/
-
-	position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
-
 	// The logic in this section establishes the tracking between the current waypoint
 	// which we are approaching and the next waypoint, which will tell us in which direction
 	// we will change our trajectory right after reaching it.
@@ -1096,8 +1229,9 @@ Mission::set_mission_items()
 	// we are searching around the current mission item in the list to find the closest
 	// gate and the closest waypoint. We then store them separately.
 
-	// Check if the mission item is a gate
-	// along the current trajectory
+	position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
+
+	// Check if the mission item is a gate along the current trajectory
 	if (item_contains_gate(_mission_item)) {
 
 		// The mission item is a gate, let's check if the next item in the list provides
@@ -1150,10 +1284,8 @@ Mission::set_mission_items()
 		set_current_mission_item();
 	}
 
-	// If the mission item under evaluation contains a gate,
-	// then we need to check if we have a next position item so
-	// the controller can fly the correct line between the
-	// current and next setpoint
+	// If the mission item under evaluation contains a gate, we need to check if we have a next position item so
+	// the controller can fly the correct line between the current and next setpoint
 	if (item_contains_gate(_mission_item)) {
 		if (has_after_next_position_item) {
 			/* got next mission item, update setpoint triplet */
@@ -1165,7 +1297,15 @@ Mission::set_mission_items()
 		}
 
 	} else {
-		if (_mission_item.autocontinue && get_time_inside(_mission_item) < FLT_EPSILON) {
+		// Allow a rotary wing vehicle to decelerate before reaching a wp with a hold time or a timeout
+		// This is done by setting the position triplet's next position's valid flag to false,
+		// which makes the FlightTask disregard the next position
+		// TODO: Setting the next waypoint's validity flag to handle braking / correct waypoint behavior
+		// seems hacky, handle this more properly.
+		const bool brake_for_hold = _navigator->get_vstatus()->vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING
+					    && (get_time_inside(_mission_item) > FLT_EPSILON || item_has_timeout(_mission_item));
+
+		if (_mission_item.autocontinue && !brake_for_hold) {
 			/* try to process next mission item */
 			if (has_next_position_item) {
 				/* got next mission item, update setpoint triplet */
@@ -1379,39 +1519,17 @@ Mission::heading_sp_update()
 }
 
 void
-Mission::cruising_speed_sp_update()
-{
-	struct position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
-
-	const float cruising_speed = _navigator->get_cruising_speed();
-
-	/* Don't change setpoint if the current waypoint is not valid */
-	if (!pos_sp_triplet->current.valid ||
-	    fabsf(pos_sp_triplet->current.cruising_speed - cruising_speed) < FLT_EPSILON) {
-		return;
-	}
-
-	pos_sp_triplet->current.cruising_speed = cruising_speed;
-
-	publish_navigator_mission_item();
-	_navigator->set_position_setpoint_triplet_updated();
-}
-
-void
 Mission::do_abort_landing()
 {
-	// Abort FW landing
-	//  first climb out then loiter over intended landing location
+	// Abort FW landing, loiter above landing site in at least MIS_LND_ABRT_ALT
 
 	if (_mission_item.nav_cmd != NAV_CMD_LAND) {
 		return;
 	}
 
-	// loiter at the larger of MIS_LTRMIN_ALT above the landing point
-	//  or 2 * FW_CLMBOUT_DIFF above the current altitude
 	const float alt_landing = get_absolute_altitude_for_item(_mission_item);
-	const float alt_sp = math::max(alt_landing + _navigator->get_loiter_min_alt(),
-				       _navigator->get_global_position()->alt + 20.0f);
+	const float alt_sp = math::max(alt_landing + _navigator->get_landing_abort_min_alt(),
+				       _navigator->get_global_position()->alt);
 
 	// turn current landing waypoint into an indefinite loiter
 	_mission_item.nav_cmd = NAV_CMD_LOITER_UNLIMITED;
@@ -1424,11 +1542,21 @@ Mission::do_abort_landing()
 
 	mission_apply_limitation(_mission_item);
 	mission_item_to_position_setpoint(_mission_item, &_navigator->get_position_setpoint_triplet()->current);
+
+	// XXX: this is a hack to invalidate the "next" position setpoint for the fixed-wing position controller during
+	// the landing abort hold. otherwise, the "next" setpoint would still register as a "LAND" point, and trigger
+	// the early landing configuration (flaps and landing airspeed) during the hold.
+	_navigator->get_position_setpoint_triplet()->next.lat = (double)NAN;
+	_navigator->get_position_setpoint_triplet()->next.lon = (double)NAN;
+	_navigator->get_position_setpoint_triplet()->next.alt = NAN;
+
 	publish_navigator_mission_item(); // for logging
 	_navigator->set_position_setpoint_triplet_updated();
 
-	mavlink_log_info(_navigator->get_mavlink_log_pub(), "Holding at %d m above landing.",
+	mavlink_log_info(_navigator->get_mavlink_log_pub(), "Holding at %d m above landing waypoint.\t",
 			 (int)(alt_sp - alt_landing));
+	events::send<float>(events::ID("mission_holding_above_landing"), events::Log::Info,
+			    "Holding at {1:.0m_v} above landing waypoint", alt_sp - alt_landing);
 
 	// reset mission index to start of landing
 	if (_land_start_available) {
@@ -1508,8 +1636,8 @@ Mission::read_mission_item(int offset, struct mission_item_s *mission_item)
 	const int current_index = _current_mission_index;
 	int index_to_read = current_index + offset;
 
-	int *mission_index_ptr = (offset == 0) ? &_current_mission_index : &index_to_read;
-	const dm_item_t dm_item = (dm_item_t)_mission.dataman_id;
+	int *mission_index_ptr = (offset == 0) ? (int *) &_current_mission_index : &index_to_read;
+	const dm_item_t dataman_id = (dm_item_t)_mission.dataman_id;
 
 	/* do not work on empty missions */
 	if (_mission.count == 0) {
@@ -1522,22 +1650,28 @@ Mission::read_mission_item(int offset, struct mission_item_s *mission_item)
 		if (*mission_index_ptr < 0 || *mission_index_ptr >= (int)_mission.count) {
 			/* mission item index out of bounds - if they are equal, we just reached the end */
 			if ((*mission_index_ptr != (int)_mission.count) && (*mission_index_ptr != -1)) {
-				mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Mission item index out of bound, index: %d, max: %d.",
+				mavlink_log_critical(_navigator->get_mavlink_log_pub(),
+						     "Mission item index out of bound, index: %d, max: %" PRIu16 ".\t",
 						     *mission_index_ptr, _mission.count);
+				events::send<uint16_t, uint16_t>(events::ID("mission_index_out_of_bound"), events::Log::Error,
+								 "Mission item index out of bound, index: {1}, max: {2}", *mission_index_ptr, _mission.count);
 			}
 
 			return false;
 		}
 
-		const ssize_t len = sizeof(struct mission_item_s);
-
 		/* read mission item to temp storage first to not overwrite current mission item if data damaged */
 		struct mission_item_s mission_item_tmp;
 
 		/* read mission item from datamanager */
-		if (dm_read(dm_item, *mission_index_ptr, &mission_item_tmp, len) != len) {
+		bool success = _dataman_cache.loadWait(dataman_id, *mission_index_ptr, reinterpret_cast<uint8_t *>(&mission_item_tmp),
+						       sizeof(mission_item_s), 500_ms);
+
+		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
-			mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Waypoint could not be read.");
+			mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Waypoint could not be read.\t");
+			events::send<uint16_t>(events::ID("mission_failed_to_read_wp"), events::Log::Error,
+					       "Waypoint {1} could not be read from storage", *mission_index_ptr);
 			return false;
 		}
 
@@ -1554,9 +1688,14 @@ Mission::read_mission_item(int offset, struct mission_item_s *mission_item)
 					(mission_item_tmp.do_jump_current_count)++;
 
 					/* save repeat count */
-					if (dm_write(dm_item, *mission_index_ptr, DM_PERSIST_POWER_ON_RESET, &mission_item_tmp, len) != len) {
+					success = _dataman_client.writeSync(dataman_id, *mission_index_ptr, reinterpret_cast<uint8_t *>(&mission_item_tmp),
+									    sizeof(struct mission_item_s));
+
+					if (!success) {
 						/* not supposed to happen unless the datamanager can't access the dataman */
-						mavlink_log_critical(_navigator->get_mavlink_log_pub(), "DO JUMP waypoint could not be written.");
+						mavlink_log_critical(_navigator->get_mavlink_log_pub(), "DO JUMP waypoint could not be written.\t");
+						events::send(events::ID("mission_failed_to_write_do_jump"), events::Log::Error,
+							     "DO JUMP waypoint could not be written");
 						return false;
 					}
 
@@ -1569,7 +1708,9 @@ Mission::read_mission_item(int offset, struct mission_item_s *mission_item)
 
 			} else {
 				if (offset == 0 && execute_jumps) {
-					mavlink_log_info(_navigator->get_mavlink_log_pub(), "DO JUMP repetitions completed.");
+					mavlink_log_info(_navigator->get_mavlink_log_pub(), "DO JUMP repetitions completed.\t");
+					events::send(events::ID("mission_do_jump_rep_completed"), events::Log::Info,
+						     "DO JUMP repetitions completed");
 				}
 
 				/* no more DO_JUMPS, therefore just try to continue with next mission item */
@@ -1589,26 +1730,28 @@ Mission::read_mission_item(int offset, struct mission_item_s *mission_item)
 	}
 
 	/* we have given up, we don't want to cycle forever */
-	mavlink_log_critical(_navigator->get_mavlink_log_pub(), "DO JUMP is cycling, giving up.");
+	mavlink_log_critical(_navigator->get_mavlink_log_pub(), "DO JUMP is cycling, giving up.\t");
+	events::send(events::ID("mission_do_jump_cycle"), events::Log::Error, "DO JUMP is cycling, giving up");
 	return false;
 }
 
 void
 Mission::save_mission_state()
 {
-	mission_s mission_state = {};
-
-	/* lock MISSION_STATE item */
-	int dm_lock_ret = dm_lock(DM_KEY_MISSION_STATE);
-
-	if (dm_lock_ret != 0) {
-		PX4_ERR("DM_KEY_MISSION_STATE lock failed");
+	if (_navigator->get_vstatus()->arming_state == vehicle_status_s::ARMING_STATE_ARMED) {
+		// Save only while disarmed, as this is a blocking operation
+		_need_mission_save = true;
+		return;
 	}
 
-	/* read current state */
-	int read_res = dm_read(DM_KEY_MISSION_STATE, 0, &mission_state, sizeof(mission_s));
+	_need_mission_save = false;
+	mission_s mission_state = {};
 
-	if (read_res == sizeof(mission_s)) {
+	/* read current state */
+	bool success = _dataman_client.readSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission_state),
+						sizeof(mission_s));
+
+	if (success) {
 		/* data read successfully, check dataman ID and items count */
 		if (mission_state.dataman_id == _mission.dataman_id && mission_state.count == _mission.count) {
 			/* navigator may modify only sequence, write modified state only if it changed */
@@ -1616,8 +1759,10 @@ Mission::save_mission_state()
 				mission_state.current_seq = _current_mission_index;
 				mission_state.timestamp = hrt_absolute_time();
 
-				if (dm_write(DM_KEY_MISSION_STATE, 0, DM_PERSIST_POWER_ON_RESET, &mission_state,
-					     sizeof(mission_s)) != sizeof(mission_s)) {
+				success = _dataman_client.writeSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission_state),
+								    sizeof(mission_s));
+
+				if (!success) {
 
 					PX4_ERR("Can't save mission state");
 				}
@@ -1631,19 +1776,20 @@ Mission::save_mission_state()
 		mission_state.count = _mission.count;
 		mission_state.current_seq = _current_mission_index;
 
-		mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Invalid mission state.");
+		mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Invalid mission state.\t");
+		/* EVENT
+		 * @description No mission or storage failure
+		 */
+		events::send(events::ID("mission_invalid_mission_state"), events::Log::Error, "Invalid mission state");
 
 		/* write modified state only if changed */
-		if (dm_write(DM_KEY_MISSION_STATE, 0, DM_PERSIST_POWER_ON_RESET, &mission_state,
-			     sizeof(mission_s)) != sizeof(mission_s)) {
+		success = _dataman_client.writeSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission_state),
+						    sizeof(mission_s));
+
+		if (!success) {
 
 			PX4_ERR("Can't save mission state");
 		}
-	}
-
-	/* unlock MISSION_STATE item */
-	if (dm_lock_ret == 0) {
-		dm_unlock(DM_KEY_MISSION_STATE);
 	}
 }
 
@@ -1663,12 +1809,6 @@ Mission::set_mission_item_reached()
 {
 	_navigator->get_mission_result()->seq_reached = _current_mission_index;
 	_navigator->set_mission_result_updated();
-
-	// let the navigator know that we are currently executing the mission landing.
-	// Using the method landing() itself is not accurate as it only give information about the mission index
-	// but the vehicle could still be very far from the actual landing items
-	_navigator->setMissionLandingInProgress(landing());
-
 	reset_mission_item_reached();
 }
 
@@ -1686,20 +1826,17 @@ Mission::set_current_mission_item()
 void
 Mission::check_mission_valid(bool force)
 {
-	if ((!_home_inited && _navigator->home_position_valid()) || force) {
+	if ((!_home_inited && _navigator->home_global_position_valid()) || force) {
 
-		MissionFeasibilityChecker _missionFeasibilityChecker(_navigator);
+		MissionFeasibilityChecker _missionFeasibilityChecker(_navigator, _dataman_client);
 
 		_navigator->get_mission_result()->valid =
-			_missionFeasibilityChecker.checkMissionFeasible(_mission,
-					_param_mis_dist_1wp.get(),
-					_param_mis_dist_wps.get(),
-					_navigator->mission_landing_required());
+			_missionFeasibilityChecker.checkMissionFeasible(_mission);
 
 		_navigator->get_mission_result()->seq_total = _mission.count;
 		_navigator->increment_mission_instance_count();
 		_navigator->set_mission_result_updated();
-		_home_inited = _navigator->home_position_valid();
+		_home_inited = _navigator->home_global_position_valid();
 
 		// find and store landing start marker (if available)
 		find_mission_land_start();
@@ -1709,22 +1846,23 @@ Mission::check_mission_valid(bool force)
 void
 Mission::reset_mission(struct mission_s &mission)
 {
-	dm_lock(DM_KEY_MISSION_STATE);
-
-	if (dm_read(DM_KEY_MISSION_STATE, 0, &mission, sizeof(mission_s)) == sizeof(mission_s)) {
+	if (_dataman_client.readSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission), sizeof(mission_s))) {
 		if (mission.dataman_id == DM_KEY_WAYPOINTS_OFFBOARD_0 || mission.dataman_id == DM_KEY_WAYPOINTS_OFFBOARD_1) {
 			/* set current item to 0 */
 			mission.current_seq = 0;
 
 			/* reset jump counters */
 			if (mission.count > 0) {
-				const dm_item_t dm_current = (dm_item_t)mission.dataman_id;
+				const dm_item_t dataman_id = (dm_item_t)mission.dataman_id;
 
 				for (unsigned index = 0; index < mission.count; index++) {
 					struct mission_item_s item;
 					const ssize_t len = sizeof(struct mission_item_s);
 
-					if (dm_read(dm_current, index, &item, len) != len) {
+					bool success = _dataman_client.readSync(dataman_id, index, reinterpret_cast<uint8_t *>(&item), sizeof(mission_item_s),
+										500_ms);
+
+					if (!success) {
 						PX4_WARN("could not read mission item during reset");
 						break;
 					}
@@ -1732,7 +1870,9 @@ Mission::reset_mission(struct mission_s &mission)
 					if (item.nav_cmd == NAV_CMD_DO_JUMP) {
 						item.do_jump_current_count = 0;
 
-						if (dm_write(dm_current, index, DM_PERSIST_POWER_ON_RESET, &item, len) != len) {
+						success = _dataman_client.writeSync(dataman_id, index, reinterpret_cast<uint8_t *>(&item), len);
+
+						if (!success) {
 							PX4_WARN("could not save mission item during reset");
 							break;
 						}
@@ -1741,7 +1881,8 @@ Mission::reset_mission(struct mission_s &mission)
 			}
 
 		} else {
-			mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Could not read mission.");
+			mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Could not read mission.\t");
+			events::send(events::ID("mission_cannot_read_mission"), events::Log::Error, "Could not read mission");
 
 			/* initialize mission state in dataman */
 			mission.timestamp = hrt_absolute_time();
@@ -1750,17 +1891,16 @@ Mission::reset_mission(struct mission_s &mission)
 			mission.current_seq = 0;
 		}
 
-		dm_write(DM_KEY_MISSION_STATE, 0, DM_PERSIST_POWER_ON_RESET, &mission, sizeof(mission_s));
+		_dataman_client.writeSync(DM_KEY_MISSION_STATE, 0, reinterpret_cast<uint8_t *>(&mission), sizeof(mission_s));
 	}
-
-	dm_unlock(DM_KEY_MISSION_STATE);
 }
 
 bool
 Mission::need_to_reset_mission()
 {
-	/* reset mission state when disarmed */
-	if (_navigator->get_vstatus()->arming_state != vehicle_status_s::ARMING_STATE_ARMED && _need_mission_reset) {
+	// reset mission when disarmed, mission was actually started and we reached the last mission item
+	if (_navigator->get_vstatus()->arming_state != vehicle_status_s::ARMING_STATE_ARMED && _need_mission_reset
+	    && (_current_mission_index == _mission.count - 1)) {
 		_need_mission_reset = false;
 		return true;
 	}
@@ -1768,19 +1908,8 @@ Mission::need_to_reset_mission()
 	return false;
 }
 
-void
-Mission::generate_waypoint_from_heading(struct position_setpoint_s *setpoint, float yaw)
-{
-	waypoint_from_heading_and_distance(
-		_navigator->get_global_position()->lat, _navigator->get_global_position()->lon,
-		yaw, 1000000.0f,
-		&(setpoint->lat), &(setpoint->lon));
-	setpoint->type = position_setpoint_s::SETPOINT_TYPE_POSITION;
-	setpoint->yaw = yaw;
-}
-
 int32_t
-Mission::index_closest_mission_item() const
+Mission::index_closest_mission_item()
 {
 	int32_t min_dist_index(0);
 	float min_dist(FLT_MAX), dist_xy(FLT_MAX), dist_z(FLT_MAX);
@@ -1789,9 +1918,11 @@ Mission::index_closest_mission_item() const
 
 	for (size_t i = 0; i < _mission.count; i++) {
 		struct mission_item_s missionitem = {};
-		const ssize_t len = sizeof(missionitem);
 
-		if (dm_read(dm_current, i, &missionitem, len) != len) {
+		bool success = _dataman_client.readSync(dm_current, i, reinterpret_cast<uint8_t *>(&missionitem),
+							sizeof(mission_item_s), 500_ms);
+
+		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
 			PX4_ERR("dataman read failure");
 			break;
@@ -1841,16 +1972,9 @@ bool Mission::position_setpoint_equal(const position_setpoint_s *p1, const posit
 {
 	return ((p1->valid == p2->valid) &&
 		(p1->type == p2->type) &&
-		(fabsf(p1->x - p2->x) < FLT_EPSILON) &&
-		(fabsf(p1->y - p2->y) < FLT_EPSILON) &&
-		(fabsf(p1->z - p2->z) < FLT_EPSILON) &&
-		(p1->position_valid == p2->position_valid) &&
 		(fabsf(p1->vx - p2->vx) < FLT_EPSILON) &&
 		(fabsf(p1->vy - p2->vy) < FLT_EPSILON) &&
 		(fabsf(p1->vz - p2->vz) < FLT_EPSILON) &&
-		(p1->velocity_valid == p2->velocity_valid) &&
-		(p1->velocity_frame == p2->velocity_frame) &&
-		(p1->alt_valid == p2->alt_valid) &&
 		(fabs(p1->lat - p2->lat) < DBL_EPSILON) &&
 		(fabs(p1->lon - p2->lon) < DBL_EPSILON) &&
 		(fabsf(p1->alt - p2->alt) < FLT_EPSILON) &&
@@ -1859,13 +1983,7 @@ bool Mission::position_setpoint_equal(const position_setpoint_s *p1, const posit
 		(fabsf(p1->yawspeed - p2->yawspeed) < FLT_EPSILON) &&
 		(p1->yawspeed_valid == p2->yawspeed_valid) &&
 		(fabsf(p1->loiter_radius - p2->loiter_radius) < FLT_EPSILON) &&
-		(p1->loiter_direction == p2->loiter_direction) &&
-		(fabsf(p1->pitch_min - p2->pitch_min) < FLT_EPSILON) &&
-		(fabsf(p1->a_x - p2->a_x) < FLT_EPSILON) &&
-		(fabsf(p1->a_y - p2->a_y) < FLT_EPSILON) &&
-		(fabsf(p1->a_z - p2->a_z) < FLT_EPSILON) &&
-		(p1->acceleration_valid == p2->acceleration_valid) &&
-		(p1->acceleration_is_force == p2->acceleration_is_force) &&
+		(p1->loiter_direction_counter_clockwise == p2->loiter_direction_counter_clockwise) &&
 		(fabsf(p1->acceptance_radius - p2->acceptance_radius) < FLT_EPSILON) &&
 		(fabsf(p1->cruising_speed - p2->cruising_speed) < FLT_EPSILON) &&
 		((fabsf(p1->cruising_throttle - p2->cruising_throttle) < FLT_EPSILON) || (!PX4_ISFINITE(p1->cruising_throttle)
@@ -1901,4 +2019,154 @@ void Mission::publish_navigator_mission_item()
 	navigator_mission_item.timestamp = hrt_absolute_time();
 
 	_navigator_mission_item_pub.publish(navigator_mission_item);
+}
+
+bool Mission::getPreviousPositionItemIndex(const mission_s &mission, int inactivation_index,
+		unsigned &prev_pos_index) const
+{
+
+	for (int index = inactivation_index; index >= 0; index--) {
+		mission_item_s mission_item;
+		const dm_item_t dm_current = (dm_item_t)mission.dataman_id;
+		bool success = _dataman_client.readSync(dm_current, index, reinterpret_cast<uint8_t *>(&mission_item),
+							sizeof(mission_item), 500_ms);
+
+		if (!success) {
+			break;
+		}
+
+		if (MissionBlock::item_contains_position(mission_item)) {
+			prev_pos_index = index;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool Mission::getNextPositionMissionItem(const mission_s &mission, int start_index, mission_item_s &mission_item)
+{
+	const dm_item_t dm_current = (dm_item_t)mission.dataman_id;
+
+	while (start_index < mission.count) {
+		// start_index is expected to be after _current_mission_index, and the item should therefore be cached
+		bool success = _dataman_cache.loadWait(dm_current, start_index, reinterpret_cast<uint8_t *>(&mission_item),
+						       sizeof(mission_item), 500_ms);
+
+		if (success && MissionBlock::item_contains_position(mission_item)) {
+			return true;
+		}
+
+		start_index++;
+	}
+
+	return false;
+}
+
+void Mission::cacheItem(const mission_item_s &mission_item)
+{
+	switch (mission_item.nav_cmd) {
+	case NAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE:
+		_last_gimbal_configure_item = mission_item;
+		break;
+
+	case NAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW:
+		_last_gimbal_control_item = mission_item;
+		break;
+
+	case NAV_CMD_SET_CAMERA_MODE:
+		_last_camera_mode_item = mission_item;
+		break;
+
+	case NAV_CMD_DO_SET_CAM_TRIGG_DIST:
+	case NAV_CMD_DO_TRIGGER_CONTROL:
+	case NAV_CMD_IMAGE_START_CAPTURE:
+	case NAV_CMD_IMAGE_STOP_CAPTURE:
+		_last_camera_trigger_item = mission_item;
+		break;
+
+	case NAV_CMD_DO_CHANGE_SPEED:
+		_last_speed_change_item = mission_item;
+		break;
+
+	case NAV_CMD_DO_VTOL_TRANSITION:
+		// delete speed changes after a VTOL transition
+		_last_speed_change_item = {};
+		break;
+
+	default:
+		break;
+	}
+}
+
+void Mission::replayCachedGimbalCameraItems()
+{
+	if (_last_gimbal_configure_item.nav_cmd > 0) {
+		issue_command(_last_gimbal_configure_item);
+		_last_gimbal_configure_item = {}; // delete cached item
+	}
+
+	if (_last_gimbal_control_item.nav_cmd > 0) {
+		issue_command(_last_gimbal_control_item);
+		_last_gimbal_control_item = {}; // delete cached item
+	}
+
+	if (_last_camera_mode_item.nav_cmd > 0) {
+		issue_command(_last_camera_mode_item);
+		_last_camera_mode_item = {}; // delete cached item
+	}
+}
+
+void Mission::replayCachedTriggerItems()
+{
+	if (_last_camera_trigger_item.nav_cmd > 0) {
+		issue_command(_last_camera_trigger_item);
+		_last_camera_trigger_item = {}; // delete cached item
+	}
+}
+
+void Mission::replayCachedSpeedChangeItems()
+{
+	if (_last_speed_change_item.nav_cmd == NAV_CMD_DO_CHANGE_SPEED) {
+		issue_command(_last_speed_change_item);
+		_last_speed_change_item = {}; // delete cached item
+	}
+}
+
+void Mission::resetItemCache()
+{
+	_last_gimbal_configure_item = {};
+	_last_gimbal_control_item = {};
+	_last_camera_mode_item = {};
+	_last_camera_trigger_item = {};
+}
+
+bool Mission::haveCachedGimbalOrCameraItems()
+{
+	return _last_gimbal_configure_item.nav_cmd > 0 ||
+	       _last_gimbal_control_item.nav_cmd > 0 ||
+	       _last_camera_mode_item.nav_cmd > 0;
+}
+
+bool Mission::cameraWasTriggering()
+{
+	return (_last_camera_trigger_item.nav_cmd == NAV_CMD_DO_TRIGGER_CONTROL
+		&& (int)(_last_camera_trigger_item.params[0] + 0.5f) == 1) ||
+	       (_last_camera_trigger_item.nav_cmd == NAV_CMD_IMAGE_START_CAPTURE) ||
+	       (_last_camera_trigger_item.nav_cmd == NAV_CMD_DO_SET_CAM_TRIGG_DIST
+		&& _last_camera_trigger_item.params[0] > FLT_EPSILON);
+}
+
+void Mission::updateCachedItemsUpToIndex(const int end_index)
+{
+	for (int i = 0; i <= end_index; i++) {
+		mission_item_s mission_item;
+		const dm_item_t dm_current = (dm_item_t)_mission.dataman_id;
+		bool success = _dataman_client.readSync(dm_current, i, reinterpret_cast<uint8_t *>(&mission_item),
+							sizeof(mission_item), 500_ms);
+
+		if (success) {
+			cacheItem(mission_item);
+		}
+	}
 }

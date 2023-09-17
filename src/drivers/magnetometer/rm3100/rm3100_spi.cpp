@@ -40,7 +40,6 @@
 #include <px4_platform_common/px4_config.h>
 
 #include <assert.h>
-#include <debug.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -49,7 +48,6 @@
 #include <unistd.h>
 
 #include <drivers/device/spi.h>
-#include <drivers/drv_device.h>
 
 #include "board_config.h"
 #include "rm3100.h"

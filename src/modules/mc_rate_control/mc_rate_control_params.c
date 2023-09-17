@@ -283,6 +283,7 @@ PARAM_DEFINE_FLOAT(MC_YAWRATE_K, 1.0f);
 
 /**
  * Max acro roll rate
+ *
  * default: 2 turns per second
  *
  * @unit deg/s
@@ -296,6 +297,7 @@ PARAM_DEFINE_FLOAT(MC_ACRO_R_MAX, 720.0f);
 
 /**
  * Max acro pitch rate
+ *
  * default: 2 turns per second
  *
  * @unit deg/s
@@ -309,6 +311,7 @@ PARAM_DEFINE_FLOAT(MC_ACRO_P_MAX, 720.0f);
 
 /**
  * Max acro yaw rate
+ *
  * default 1.5 turns per second
  *
  * @unit deg/s
@@ -356,7 +359,7 @@ PARAM_DEFINE_FLOAT(MC_ACRO_EXPO_Y, 0.69f);
  * SuperExpo factor for refining the input curve shape tuned using MC_ACRO_EXPO.
  *
  * 0 Pure Expo function
- * 0.7 resonable shape enhancement for intuitive stick feel
+ * 0.7 reasonable shape enhancement for intuitive stick feel
  * 0.95 very strong bent input curve only near maxima have effect
  *
  * @min 0
@@ -372,7 +375,7 @@ PARAM_DEFINE_FLOAT(MC_ACRO_SUPEXPO, 0.7f);
  * SuperExpo factor for refining the input curve shape tuned using MC_ACRO_EXPO_Y.
  *
  * 0 Pure Expo function
- * 0.7 resonable shape enhancement for intuitive stick feel
+ * 0.7 reasonable shape enhancement for intuitive stick feel
  * 0.95 very strong bent input curve only near maxima have effect
  *
  * @min 0

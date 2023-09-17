@@ -49,7 +49,6 @@
  * checks in the commander.
  * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
  *
- * @reboot_required true
  * @min 0
  * @max 894281
  * @category Developer
@@ -58,33 +57,17 @@
 PARAM_DEFINE_INT32(CBRK_SUPPLY_CHK, 0);
 
 /**
- * Circuit breaker for rate controller output
- *
- * Setting this parameter to 140253 will disable the rate
- * controller uORB publication.
- * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
- *
- * @reboot_required true
- * @min 0
- * @max 140253
- * @category Developer
- * @group Circuit Breaker
- */
-PARAM_DEFINE_INT32(CBRK_RATE_CTRL, 0);
-
-/**
  * Circuit breaker for IO safety
  *
  * Setting this parameter to 22027 will disable IO safety.
  * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
  *
- * @reboot_required true
  * @min 0
  * @max 22027
  * @category Developer
  * @group Circuit Breaker
  */
-PARAM_DEFINE_INT32(CBRK_IO_SAFETY, 0);
+PARAM_DEFINE_INT32(CBRK_IO_SAFETY, 22027);
 
 /**
  * Circuit breaker for airspeed sensor
@@ -118,22 +101,6 @@ PARAM_DEFINE_INT32(CBRK_AIRSPD_CHK, 0);
 PARAM_DEFINE_INT32(CBRK_FLIGHTTERM, 121212);
 
 /**
- * Circuit breaker for engine failure detection
- *
- * Setting this parameter to 284953 will disable the engine failure detection.
- * If the aircraft is in engine failure mode the engine failure flag will be
- * set to healthy
- * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
- *
- * @reboot_required true
- * @min 0
- * @max 284953
- * @category Developer
- * @group Circuit Breaker
- */
-PARAM_DEFINE_INT32(CBRK_ENGINEFAIL, 284953);
-
-/**
  * Circuit breaker for disabling buzzer
  *
  * Setting this parameter to 782097 will disable the buzzer audio notification.
@@ -153,31 +120,19 @@ PARAM_DEFINE_INT32(CBRK_BUZZER, 0);
  * Circuit breaker for USB link check
  *
  * Setting this parameter to 197848 will disable the USB connected
- * checks in the commander.
- * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
+ * checks in the commander, setting it to 0 keeps them enabled (recommended).
  *
- * @reboot_required true
+ * We are generally recommending to not fly with the USB link
+ * connected and production vehicles should set this parameter to
+ * zero to prevent users from flying USB powered. However, for R&D purposes
+ * it has proven over the years to work just fine.
+ *
  * @min 0
  * @max 197848
  * @category Developer
  * @group Circuit Breaker
  */
-PARAM_DEFINE_INT32(CBRK_USB_CHK, 0);
-
-/**
- * Circuit breaker for position error check
- *
- * Setting this parameter to 201607 will disable the position and velocity
- * accuracy checks in the commander.
- * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
- *
- * @reboot_required true
- * @min 0
- * @max 201607
- * @category Developer
- * @group Circuit Breaker
- */
-PARAM_DEFINE_INT32(CBRK_VELPOSERR, 0);
+PARAM_DEFINE_INT32(CBRK_USB_CHK, 197848);
 
 /**
  * Circuit breaker for arming in fixed-wing mode check
@@ -186,7 +141,6 @@ PARAM_DEFINE_INT32(CBRK_VELPOSERR, 0);
  * mode for VTOLs.
  * WARNING: ENABLING THIS CIRCUIT BREAKER IS AT OWN RISK
  *
- * @reboot_required true
  * @min 0
  * @max 159753
  * @category Developer

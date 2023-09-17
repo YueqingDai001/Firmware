@@ -35,7 +35,7 @@
  ****************************************************************************/
 
 /* The FMURT1062 has 8MiB of QSPI FLASH beginning at address,
- * 0x0060:0000, Upto 512Kb of DTCM RAM beginning at 0x2000:0000, and 1MiB OCRAM
+ * 0x0060:0000, Up to 512Kb of DTCM RAM beginning at 0x2000:0000, and 1MiB OCRAM
  * beginning at 0x2020:0000.  Neither DTCM or SDRAM are used in this
  * configuratin.
  */
@@ -102,16 +102,6 @@ SECTIONS
 		_sinit = ABSOLUTE(.);
          KEEP(*(.init_array .init_array.*))
 		_einit = ABSOLUTE(.);
-	} > flash
-
-	/*
-	 * Construction data for parameters.
-	 */
-	__param ALIGN(4):
-	{
-		__param_start = ABSOLUTE(.);
-		KEEP(*(__param*))
-		__param_end = ABSOLUTE(.);
 	} > flash
 
 	.ARM.extab :

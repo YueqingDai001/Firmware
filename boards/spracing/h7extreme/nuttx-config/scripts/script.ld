@@ -142,12 +142,10 @@ SECTIONS
 
 		*modules__mc_att_control.a:*(.text* .rodata*)
 		*modules__mc_rate_control.a:*(.text* .rodata*)
-		*modules__rc_update.a:*(.text* .rodata*)
-		*drivers__mpu6000.a:*(.text* .rodata*)
 		*drivers__imu__invensense__icm20602.a:*(.text* .rodata*)
+		*drivers__imu__invensense__icm42688p.a:*(.text* .rodata*)
 		*drivers__device.a:*(.text* .rodata*)
 		*drivers__pwm_out.a:*(.text* .rodata*)
-		*vehicle_acceleration.a:*(.text* .rodata*)
 		*vehicle_angular_velocity.a:*(.text* .rodata*)
 		*modules__attitude_estimator_q.a:*(.text* .rodata*)
 		*stm32_spi.o(.text* .rodata*)
@@ -165,6 +163,7 @@ SECTIONS
 		*modules__flight_mode_manager.a:*(.text* .rodata*)
 		*modules__mc_pos_control.a:*(.text* .rodata*)
 		*modules__mc_hover_thrust_estimator.a:*(.text* .rodata*)
+		*modules__rc_update.a:*(.text* .rodata*)
 		*modules__sensors.a:*(.text* .rodata*)
 		*libc.a:*(.text* .rodata*)
 		*modules__commander.a:*(.text* .rodata*)
@@ -222,15 +221,6 @@ SECTIONS
 		_einit = ABSOLUTE(.);
 	} > qspi
 
-	/*
-	 * Construction data for parameters.
-	 */
-	__param ALIGN(4): {
-		__param_start = ABSOLUTE(.);
-		KEEP(*(__param*))
-		__param_end = ABSOLUTE(.);
-	} > qspi
-
 	.ARM.extab : {
 		*(.ARM.extab*)
 	} > qspi
@@ -249,7 +239,12 @@ SECTIONS
 		*(.gnu.linkonce.d.*)
 		CONSTRUCTORS
 		_edata = ABSOLUTE(.);
-	} > sram AT > qspi
+
+		/* Pad out last section as the STM32H7 Flash write size is 256 bits. 32 bytes */
+		. = ALIGN(16);
+		FILL(0xffff)
+		. += 16;
+	} > sram AT > qspi = 0xffff
 
 	.bss : {
 		_sbss = ABSOLUTE(.);

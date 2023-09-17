@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (C) 2020 PX4 Development Team. All rights reserved.
+ *   Copyright (C) 2020-2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -42,9 +42,9 @@
 #include <px4_platform_common/module.h>
 #include <drivers/drv_adc.h>
 
-ADS1115::ADS1115(I2CSPIBusOption bus_option, int bus, int addr, int bus_frequency) :
-	I2C(DRV_ADC_DEVTYPE_ADS1115, nullptr, bus, addr, bus_frequency),
-	I2CSPIDriver(MODULE_NAME, px4::device_bus_to_wq(get_device_id()), bus_option, bus, addr),
+ADS1115::ADS1115(const I2CSPIDriverConfig &config) :
+	I2C(config),
+	I2CSPIDriver(config),
 	_cycle_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": single-sample"))
 {
 	_adc_report.device_id = this->get_device_id();
@@ -61,22 +61,6 @@ ADS1115::~ADS1115()
 {
 	ScheduleClear();
 	perf_free(_cycle_perf);
-}
-
-int ADS1115::Begin()
-{
-	int ret = init();
-
-	if (ret != PX4_OK) {
-		PX4_ERR("ADS1115 init failed");
-		return ret;
-	}
-
-	setChannel(ADS1115::A0);  // prepare for the first measure.
-
-	ScheduleOnInterval(SAMPLE_INTERVAL / 4, SAMPLE_INTERVAL / 4);
-
-	return PX4_OK;
 }
 
 void ADS1115::exit_and_cleanup()
@@ -96,6 +80,11 @@ void ADS1115::RunImpl()
 	_adc_report.timestamp = hrt_absolute_time();
 
 	if (isSampleReady()) { // whether ADS1115 is ready to be read or not
+		if (!_reported_ready_last_cycle) {
+			PX4_INFO("ADS1115: reported ready");
+			_reported_ready_last_cycle = true;
+		}
+
 		int16_t buf;
 		ADS1115::ChannelSelection ch = cycleMeasure(&buf);
 		++_channel_cycle_count;
@@ -134,33 +123,35 @@ void ADS1115::RunImpl()
 		}
 
 	} else {
-		PX4_WARN("ADS1115 not ready!");
+		if (_reported_ready_last_cycle) {
+			_reported_ready_last_cycle = false;
+			PX4_ERR("ADS1115: not ready. Device lost?");
+		}
 	}
 
 	perf_end(_cycle_perf);
 }
 
-I2CSPIDriverBase *ADS1115::instantiate(const BusCLIArguments &cli, const BusInstanceIterator &iterator,
-				       int runtime_instance)
-{
-	ADS1115 *instance = new ADS1115(iterator.configuredBusOption(), iterator.bus(), cli.i2c_address,
-					cli.bus_frequency);
-
-	if (!instance) {
-		PX4_ERR("alloc failed");
-		return nullptr;
-	}
-
-	if (OK != instance->Begin()) {
-		delete instance;
-		return nullptr;
-	}
-
-	return instance;
-}
-
 void ADS1115::print_usage()
 {
+
+	PRINT_MODULE_DESCRIPTION(
+		R"DESCR_STR(
+### Description
+
+Driver to enable an external [ADS1115](https://www.adafruit.com/product/1085) ADC connected via I2C.
+
+The driver is included by default in firmware for boards that do not have an internal analog to digital converter,
+such as [PilotPi](../flight_controller/raspberry_pi_pilotpi.md) or [CUAV Nora](../flight_controller/cuav_nora.md)
+(search for `CONFIG_DRIVERS_ADC_ADS1115` in board configuration files).
+
+It is enabled/disabled using the
+[ADC_ADS1115_EN](../advanced_config/parameter_reference.md#ADC_ADS1115_EN)
+parameter, and is disabled by default.
+If enabled, internal ADCs are not used.
+
+)DESCR_STR");
+	
 	PRINT_MODULE_USAGE_NAME("ads1115", "driver");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_PARAMS_I2C_SPI_DRIVER(true, false);
@@ -176,17 +167,12 @@ void ADS1115::print_status()
 
 extern "C" int ads1115_main(int argc, char *argv[])
 {
-	int ch;
 	using ThisDriver = ADS1115;
 	BusCLIArguments cli{true, false};
 	cli.default_i2c_frequency = 400000;
 	cli.i2c_address = 0x48;
 
-	while ((ch = cli.getopt(argc, argv, "")) != EOF) {
-
-	}
-
-	const char *verb = cli.optarg();
+	const char *verb = cli.parseDefaultArguments(argc, argv);
 
 	if (!verb) {
 		ThisDriver::print_usage();

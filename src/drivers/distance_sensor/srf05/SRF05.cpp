@@ -48,8 +48,10 @@
 
 SRF05::SRF05(const uint8_t rotation) :
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default),
-	_px4_rangefinder(0 /* device id not yet used */, rotation)
+	_px4_rangefinder(0 /* no device type for GPIO input */, rotation)
 {
+	_px4_rangefinder.set_device_type(DRV_DIST_DEVTYPE_SRF05);
+	_px4_rangefinder.set_rangefinder_type(distance_sensor_s::MAV_DISTANCE_SENSOR_ULTRASOUND);
 	_px4_rangefinder.set_min_distance(HXSRX0X_MIN_DISTANCE);
 	_px4_rangefinder.set_max_distance(HXSRX0X_MAX_DISTANCE);
 	_px4_rangefinder.set_fov(0.261799); // 15 degree FOV
@@ -150,7 +152,7 @@ SRF05::measure()
 	const hrt_abstime timestamp_sample = hrt_absolute_time();
 	const hrt_abstime dt = _falling_edge_time - _rising_edge_time;
 
-	const float current_distance = dt *  343.0f / 10e6f / 2.0f;
+	const float current_distance = dt *  343.0f / 1e6f / 2.0f;
 
 	if (dt > HXSRX0X_CONVERSION_TIMEOUT) {
 		perf_count(_comms_errors);
@@ -243,7 +245,7 @@ SRF05::print_status()
 	perf_print_counter(_sample_perf);
 	perf_print_counter(_comms_errors);
 	perf_print_counter(_sensor_resets);
-	printf("poll interval:  %u \n", get_measure_interval());
+	printf("poll interval:  %" PRIu32 " \n", get_measure_interval());
 	return 0;
 }
 

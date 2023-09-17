@@ -52,7 +52,6 @@ PARAM_DEFINE_FLOAT(LPE_FLW_RR, 7.0f);
  * @group Local Position Estimator
  * @min 0
  * @max 255
- * @decimal 0
  */
 PARAM_DEFINE_INT32(LPE_FLW_QMIN, 150);
 
@@ -175,6 +174,7 @@ PARAM_DEFINE_FLOAT(LPE_GPS_Z, 3.0f);
 
 /**
  * GPS xy velocity standard deviation.
+ *
  * EPV used if greater than this value.
  *
  * @group Local Position Estimator
@@ -219,7 +219,7 @@ PARAM_DEFINE_FLOAT(LPE_EPH_MAX, 3.0f);
 PARAM_DEFINE_FLOAT(LPE_EPV_MAX, 5.0f);
 
 /**
- * Vision delay compensaton.
+ * Vision delay compensation.
  *
  * Set to zero to enable automatic compensation from measurement timestamps
  *
@@ -316,6 +316,7 @@ PARAM_DEFINE_FLOAT(LPE_PN_T, 0.001f);
 
 /**
  * Terrain maximum percent grade, hilly/outdoor (100 = 45 deg), flat/Indoor (0 = 0 deg)
+ *
  * Used to calculate increased terrain random walk nosie due to movement.
  *
  * @group Local Position Estimator
@@ -339,7 +340,8 @@ PARAM_DEFINE_FLOAT(LPE_FGYRO_HP, 0.001f);
 
 /**
  * Enable publishing of a fake global position (e.g for AUTO missions using Optical Flow)
- * by initializing the estimator to the LPE_LAT/LON parameters when global information is unavailable
+ *
+ * By initializing the estimator to the LPE_LAT/LON parameters when global information is unavailable
  *
  * @group Local Position Estimator
  * @min 0

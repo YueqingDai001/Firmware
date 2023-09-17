@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2012-2015 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2012-2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -41,16 +41,15 @@
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/module.h>
 
-I2CSPIDriverBase *LIS3MDL::instantiate(const BusCLIArguments &cli, const BusInstanceIterator &iterator,
-				       int runtime_instance)
+I2CSPIDriverBase *LIS3MDL::instantiate(const I2CSPIDriverConfig &config, int runtime_instance)
 {
 	device::Device *interface = nullptr;
 
-	if (iterator.busType() == BOARD_I2C_BUS) {
-		interface = LIS3MDL_I2C_interface(iterator.bus(), cli.bus_frequency);
+	if (config.bus_type == BOARD_I2C_BUS) {
+		interface = LIS3MDL_I2C_interface(config);
 
-	} else if (iterator.busType() == BOARD_SPI_BUS) {
-		interface = LIS3MDL_SPI_interface(iterator.bus(), iterator.devid(), cli.bus_frequency, cli.spi_mode);
+	} else if (config.bus_type == BOARD_SPI_BUS) {
+		interface = LIS3MDL_SPI_interface(config);
 	}
 
 	if (interface == nullptr) {
@@ -60,11 +59,11 @@ I2CSPIDriverBase *LIS3MDL::instantiate(const BusCLIArguments &cli, const BusInst
 
 	if (interface->init() != OK) {
 		delete interface;
-		PX4_DEBUG("no device on bus %i (devid 0x%x)", iterator.bus(), iterator.devid());
+		PX4_DEBUG("no device on bus %i (devid 0x%x)", config.bus, config.spi_devid);
 		return nullptr;
 	}
 
-	LIS3MDL *dev = new LIS3MDL(interface, cli.rotation, iterator.configuredBusOption(), iterator.bus());
+	LIS3MDL *dev = new LIS3MDL(interface, config);
 
 	if (dev == nullptr) {
 		delete interface;
@@ -91,6 +90,7 @@ void LIS3MDL::print_usage()
 	PRINT_MODULE_USAGE_SUBCATEGORY("magnetometer");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_PARAMS_I2C_SPI_DRIVER(true, true);
+	PRINT_MODULE_USAGE_PARAMS_I2C_ADDRESS(0x1e);
 	PRINT_MODULE_USAGE_PARAM_INT('R', 0, 0, 35, "Rotation", true);
 	PRINT_MODULE_USAGE_COMMAND("reset");
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
@@ -101,18 +101,19 @@ extern "C" int lis3mdl_main(int argc, char *argv[])
 	using ThisDriver = LIS3MDL;
 	int ch;
 	BusCLIArguments cli{true, true};
+	cli.i2c_address = LIS3MDLL_ADDRESS;
 	cli.default_i2c_frequency = 400000;
 	cli.default_spi_frequency = 11 * 1000 * 1000;
 
-	while ((ch = cli.getopt(argc, argv, "R:")) != EOF) {
+	while ((ch = cli.getOpt(argc, argv, "R:")) != EOF) {
 		switch (ch) {
 		case 'R':
-			cli.rotation = (enum Rotation)atoi(cli.optarg());
+			cli.rotation = (enum Rotation)atoi(cli.optArg());
 			break;
 		}
 	}
 
-	const char *verb = cli.optarg();
+	const char *verb = cli.optArg();
 
 	if (!verb) {
 		ThisDriver::print_usage();

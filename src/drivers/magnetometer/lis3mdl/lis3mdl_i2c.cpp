@@ -40,7 +40,6 @@
 #include <px4_platform_common/px4_config.h>
 
 #include <assert.h>
-#include <debug.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -49,17 +48,14 @@
 #include <unistd.h>
 
 #include <drivers/device/i2c.h>
-#include <drivers/drv_device.h>
 
 #include "board_config.h"
 #include "lis3mdl.h"
 
-#define LIS3MDLL_ADDRESS        0x1e
-
 class LIS3MDL_I2C : public device::I2C
 {
 public:
-	LIS3MDL_I2C(int bus, int bus_frequency);
+	LIS3MDL_I2C(const I2CSPIDriverConfig &config);
 	virtual ~LIS3MDL_I2C() = default;
 
 	virtual int     read(unsigned address, void *data, unsigned count);
@@ -71,16 +67,16 @@ protected:
 };
 
 device::Device *
-LIS3MDL_I2C_interface(int bus, int bus_frequency);
+LIS3MDL_I2C_interface(const I2CSPIDriverConfig &config);
 
 device::Device *
-LIS3MDL_I2C_interface(int bus, int bus_frequency)
+LIS3MDL_I2C_interface(const I2CSPIDriverConfig &config)
 {
-	return new LIS3MDL_I2C(bus, bus_frequency);
+	return new LIS3MDL_I2C(config);
 }
 
-LIS3MDL_I2C::LIS3MDL_I2C(int bus, int bus_frequency) :
-	I2C(DRV_MAG_DEVTYPE_LIS3MDL, MODULE_NAME, bus, LIS3MDLL_ADDRESS, bus_frequency)
+LIS3MDL_I2C::LIS3MDL_I2C(const I2CSPIDriverConfig &config) :
+	I2C(config)
 {
 }
 
@@ -88,19 +84,17 @@ int LIS3MDL_I2C::probe()
 {
 	uint8_t data = 0;
 
-	_retries = 10;
-
 	if (read(ADDR_WHO_AM_I, &data, 1)) {
 		DEVICE_DEBUG("read_reg fail");
 		return -EIO;
 	}
 
-	_retries = 2;
-
 	if (data != ID_WHO_AM_I) {
 		DEVICE_DEBUG("LIS3MDL bad ID: %02x", data);
 		return -EIO;
 	}
+
+	_retries = 1;
 
 	return OK;
 }

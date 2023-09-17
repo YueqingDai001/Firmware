@@ -57,15 +57,15 @@ void BlockLocalPositionEstimator::gpsInit()
 			// find lat, lon of current origin by subtracting x and y
 			// if not using vision position since vision will
 			// have it's own origin, not necessarily where vehicle starts
-			if (!_map_ref.init_done) {
+			if (!_map_ref.isInitialized()) {
 				double gpsLatOrigin = 0;
 				double gpsLonOrigin = 0;
 				// reproject at current coordinates
-				map_projection_init(&_map_ref, gpsLat, gpsLon);
+				_map_ref.initReference(gpsLat, gpsLon);
 				// find origin
-				map_projection_reproject(&_map_ref, -_x(X_x), -_x(X_y), &gpsLatOrigin, &gpsLonOrigin);
+				_map_ref.reproject(-_x(X_x), -_x(X_y), gpsLatOrigin, gpsLonOrigin);
 				// reinit origin
-				map_projection_init(&_map_ref, gpsLatOrigin, gpsLonOrigin);
+				_map_ref.initReference(gpsLatOrigin, gpsLonOrigin);
 				// set timestamp when origin was set to current time
 				_time_origin = _timeStamp;
 
@@ -92,9 +92,9 @@ int BlockLocalPositionEstimator::gpsMeasure(Vector<double, n_y_gps> &y)
 {
 	// gps measurement
 	y.setZero();
-	y(0) = _sub_gps.get().lat * 1e-7;
-	y(1) = _sub_gps.get().lon * 1e-7;
-	y(2) = _sub_gps.get().alt * 1e-3;
+	y(0) = _sub_gps.get().latitude_deg;
+	y(1) = _sub_gps.get().longitude_deg;
+	y(2) = _sub_gps.get().altitude_msl_m;
 	y(3) = (double)_sub_gps.get().vel_n_m_s;
 	y(4) = (double)_sub_gps.get().vel_e_m_s;
 	y(5) = (double)_sub_gps.get().vel_d_m_s;
@@ -119,7 +119,7 @@ void BlockLocalPositionEstimator::gpsCorrect()
 	float px = 0;
 	float py = 0;
 	float pz = -(alt - _gpsAltOrigin);
-	map_projection_project(&_map_ref, lat, lon, &px, &py);
+	_map_ref.project(lat, lon, px, py);
 	Vector<float, n_y_gps> y;
 	y.setZero();
 	y(Y_gps_x) = px;
@@ -210,7 +210,7 @@ void BlockLocalPositionEstimator::gpsCorrect()
 	// fault detection
 	float beta = (r.transpose() * (S_I * r))(0, 0);
 
-	// artifically increase beta threshhold to prevent fault during landing
+	// artificially increase beta threshhold to prevent fault during landing
 	float beta_thresh = 1e2f;
 
 	if (beta / BETA_TABLE[n_y_gps] > beta_thresh) {

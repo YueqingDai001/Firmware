@@ -34,7 +34,9 @@
 #pragma once
 
 #include "log_writer.h"
+#include "logged_topics.h"
 #include "messages.h"
+#include "watchdog.h"
 #include <containers/Array.hpp>
 #include "util.h"
 #include <px4_platform_common/defines.h>
@@ -86,11 +88,26 @@ public:
 		while_armed = 0,
 		boot_until_disarm,
 		boot_until_shutdown,
-		rc_aux1
+		rc_aux1,
+		arm_until_shutdown,
 	};
 
+	enum class PrintLoadReason {
+		Preflight,
+		Postflight,
+		Watchdog
+	};
+
+	struct timer_callback_data_s {
+		px4_sem_t semaphore;
+
+		watchdog_data_t watchdog_data;
+		px4::atomic_bool watchdog_triggered{false};
+	};
+
+
 	Logger(LogWriter::Backend backend, size_t buffer_size, uint32_t log_interval, const char *poll_topic_name,
-	       LogMode log_mode, bool log_name_timestamp);
+	       LogMode log_mode, bool log_name_timestamp, float rate_factor);
 
 	~Logger();
 
@@ -129,13 +146,14 @@ public:
 
 	void set_arm_override(bool override) { _manually_logging_override = override; }
 
-private:
+	void trigger_watchdog_now()
+	{
+#ifdef __PX4_NUTTX
+		_timer_callback_data.watchdog_data.manual_watchdog_trigger = true;
+#endif
+	}
 
-	enum class PrintLoadReason {
-		Preflight,
-		Postflight,
-		Watchdog
-	};
+private:
 
 	static constexpr int		MAX_MISSION_TOPICS_NUM = 5; /**< Maximum number of mission topics */
 	static constexpr unsigned	MAX_NO_LOGFILE = 999;	/**< Maximum number of log files */
@@ -193,7 +211,7 @@ private:
 	/**
 	 * Get log file name with directory (create it if necessary)
 	 */
-	int get_log_file_name(LogType type, char *file_name, size_t file_name_size);
+	int get_log_file_name(LogType type, char *file_name, size_t file_name_size, bool notify);
 
 	void start_log_file(LogType type);
 
@@ -227,9 +245,8 @@ private:
 
 	/**
 	 * write performance counters
-	 * @param preflight preflight if true, postflight otherwise
 	 */
-	void write_perf_data(bool preflight);
+	void write_perf_data(PrintLoadReason reason);
 
 	/**
 	 * write bootup console output
@@ -248,8 +265,11 @@ private:
 
 	void write_version(LogType type);
 
+	void write_excluded_optional_topics(LogType type);
+
 	void write_info(LogType type, const char *name, const char *value);
 	void write_info_multiple(LogType type, const char *name, const char *value, bool is_continued);
+	void write_info_multiple(LogType type, const char *name, int fd);
 	void write_info(LogType type, const char *name, int32_t value);
 	void write_info(LogType type, const char *name, uint32_t value);
 
@@ -258,8 +278,10 @@ private:
 	void write_info_template(LogType type, const char *name, T value, const char *type_str);
 
 	void write_parameters(LogType type);
+	void write_parameter_defaults(LogType type);
 
 	void write_changed_parameters(LogType type);
+	void write_events_file(LogType type);
 
 	inline bool copy_if_updated(int sub_idx, void *buffer, bool try_to_subscribe);
 
@@ -293,6 +315,8 @@ private:
 	void handle_vehicle_command_update();
 	void ack_vehicle_command(vehicle_command_s *cmd, uint32_t result);
 
+	void handle_file_write_error();
+
 	/**
 	 * initialize the output for the process load, so that ~1 second later it will be written to the log
 	 */
@@ -312,12 +336,19 @@ private:
 
 	void publish_logger_status();
 
+	/**
+	 * Check for events and log them
+	 */
+	bool handle_event_updates(uint32_t &total_bytes);
+
+	void adjust_subscription_updates();
+
 	uint8_t						*_msg_buffer{nullptr};
 	int						_msg_buffer_len{0};
 
 	LogFileName					_file_name[(int)LogType::Count];
 
-	bool						_prev_state{false}; ///< previous state depending on logging mode (arming or aux1 state)
+	bool						_prev_file_log_start_state{false}; ///< previous state depending on logging mode (arming or aux1 state)
 	bool						_manually_logging_override{false};
 
 	Statistics					_statistics[(int)LogType::Count];
@@ -330,12 +361,19 @@ private:
 	int						_num_subscriptions{0};
 	MissionSubscription 				_mission_subscriptions[MAX_MISSION_TOPICS_NUM] {}; ///< additional data for mission subscriptions
 	int						_num_mission_subs{0};
+	LoggerSubscription				_event_subscription; ///< Subscription for the event topic (handled separately)
+	uint16_t 					_event_sequence_offset{0}; ///< event sequence offset to account for skipped (not logged) messages
+	uint16_t 					_event_sequence_offset_mission{0};
+
+	orb_id_size_t  					_excluded_optional_topic_ids[LoggedTopics::MAX_EXCLUDED_OPTIONAL_TOPICS_NUM];
+	int						_num_excluded_optional_topic_ids{0};
 
 	LogWriter					_writer;
 	uint32_t					_log_interval{0};
+	float						_rate_factor{1.0f};
 	const orb_metadata				*_polling_topic_meta{nullptr}; ///< if non-null, poll on this topic instead of sleeping
 	orb_advert_t					_mavlink_log_pub{nullptr};
-	uint8_t						_next_topic_id{0}; ///< id of next subscribed ulog topic
+	uint8_t						_next_topic_id{0}; ///< Logger's internal id (first topic is 0, then 1, and so on) it will assign to the next subscribed ulog topic, used for ulog_message_add_logged_s
 	char						*_replay_file_name{nullptr};
 	bool						_should_stop_file_log{false}; /**< if true _next_load_print is set and file logging
 											will be stopped after load printing (for the full log) */
@@ -350,11 +388,13 @@ private:
 
 	uint32_t					_message_gaps{0};
 
+	timer_callback_data_s				_timer_callback_data{};
+
 	uORB::Subscription				_manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
 	uORB::Subscription				_vehicle_command_sub{ORB_ID(vehicle_command)};
 	uORB::Subscription				_vehicle_status_sub{ORB_ID(vehicle_status)};
-	uORB::SubscriptionInterval		_log_message_sub{ORB_ID(log_message), 20};
-	uORB::Subscription 				_parameter_update_sub{ORB_ID(parameter_update)};
+	uORB::SubscriptionInterval			_log_message_sub{ORB_ID(log_message), 20};
+	uORB::SubscriptionInterval			_parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::SDLOG_UTC_OFFSET>) _param_sdlog_utc_offset,
@@ -363,6 +403,11 @@ private:
 		(ParamInt<px4::params::SDLOG_MISSION>) _param_sdlog_mission,
 		(ParamBool<px4::params::SDLOG_BOOT_BAT>) _param_sdlog_boot_bat,
 		(ParamBool<px4::params::SDLOG_UUID>) _param_sdlog_uuid
+#if defined(PX4_CRYPTO)
+		, (ParamInt<px4::params::SDLOG_ALGORITHM>) _param_sdlog_crypto_algorithm,
+		(ParamInt<px4::params::SDLOG_KEY>) _param_sdlog_crypto_key,
+		(ParamInt<px4::params::SDLOG_EXCH_KEY>) _param_sdlog_crypto_exchange_key
+#endif
 	)
 };
 

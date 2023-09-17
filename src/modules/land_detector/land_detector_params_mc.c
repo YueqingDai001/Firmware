@@ -32,21 +32,41 @@
  ****************************************************************************/
 
 /**
- * Multicopter max climb rate
+ * Multicopter land detection trigger time
  *
- * Maximum vertical velocity allowed in the landed state (m/s up and down)
+ * Total time it takes to go through all three land detection stages:
+ * ground contact, maybe landed, landed
+ * when all necessary conditions are constantly met.
  *
- * @unit m/s
+ * @unit s
+ * @min 0.1
+ * @max 10.0
  * @decimal 1
  *
  * @group Land Detector
  */
-PARAM_DEFINE_FLOAT(LNDMC_Z_VEL_MAX, 0.50f);
+PARAM_DEFINE_FLOAT(LNDMC_TRIG_TIME, 1.0f);
+
+/**
+ * Multicopter vertical velocity threshold
+ *
+ * Vertical velocity threshold to detect landing.
+ * Has to be set lower than the expected minimal speed for landing,
+ * which is either MPC_LAND_SPEED or MPC_LAND_CRWL.
+ * This is enforced by an automatic check.
+ *
+ * @unit m/s
+ * @min 0
+ * @decimal 2
+ *
+ * @group Land Detector
+ */
+PARAM_DEFINE_FLOAT(LNDMC_Z_VEL_MAX, 0.25f);
 
 /**
  * Multicopter max horizontal velocity
  *
- * Maximum horizontal velocity allowed in the landed state (m/s)
+ * Maximum horizontal velocity allowed in the landed state
  *
  * @unit m/s
  * @decimal 1
@@ -84,3 +104,17 @@ PARAM_DEFINE_FLOAT(LNDMC_ROT_MAX, 20.0f);
  *
  */
 PARAM_DEFINE_FLOAT(LNDMC_ALT_MAX, -1.0f);
+
+/**
+ * Ground effect altitude for multicopters
+ *
+ * The height above ground below which ground effect creates barometric altitude errors.
+ * A negative value indicates no ground effect.
+ *
+ * @unit m
+ * @min -1
+ * @decimal 2
+ * @group Land Detector
+ *
+ */
+PARAM_DEFINE_FLOAT(LNDMC_ALT_GND, 2.f);

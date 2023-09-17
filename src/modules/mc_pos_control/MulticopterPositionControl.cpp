@@ -36,25 +36,23 @@
 #include <float.h>
 #include <lib/mathlib/mathlib.h>
 #include <lib/matrix/matrix/math.hpp>
+#include <px4_platform_common/events.h>
+#include "PositionControl/ControlMath.hpp"
 
-using namespace time_literals;
 using namespace matrix;
 
 MulticopterPositionControl::MulticopterPositionControl(bool vtol) :
 	SuperBlock(nullptr, "MPC"),
 	ModuleParams(nullptr),
-	WorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
+	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
 	_vehicle_attitude_setpoint_pub(vtol ? ORB_ID(mc_virtual_attitude_setpoint) : ORB_ID(vehicle_attitude_setpoint)),
 	_vel_x_deriv(this, "VELD"),
 	_vel_y_deriv(this, "VELD"),
-	_vel_z_deriv(this, "VELD"),
-	_cycle_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle time"))
+	_vel_z_deriv(this, "VELD")
 {
-	// fetch initial parameter values
 	parameters_update(true);
-
-	// set failsafe hysteresis
-	_failsafe_land_hysteresis.set_hysteresis_time_from(false, LOITER_TIME_BEFORE_DESCEND);
+	_tilt_limit_slew_rate.setSlewRate(.2f);
+	_takeoff_status_pub.advertise();
 }
 
 MulticopterPositionControl::~MulticopterPositionControl()
@@ -65,19 +63,17 @@ MulticopterPositionControl::~MulticopterPositionControl()
 bool MulticopterPositionControl::init()
 {
 	if (!_local_pos_sub.registerCallback()) {
-		PX4_ERR("vehicle_local_position callback registration failed!");
+		PX4_ERR("callback registration failed");
 		return false;
 	}
 
-	// limit to every other vehicle_local_position update (50 Hz)
-	_local_pos_sub.set_interval_us(20_ms);
-
 	_time_stamp_last_loop = hrt_absolute_time();
+	ScheduleNow();
 
 	return true;
 }
 
-int MulticopterPositionControl::parameters_update(bool force)
+void MulticopterPositionControl::parameters_update(bool force)
 {
 	// check for parameter updates
 	if (_parameter_update_sub.updated() || force) {
@@ -89,16 +85,80 @@ int MulticopterPositionControl::parameters_update(bool force)
 		ModuleParams::updateParams();
 		SuperBlock::updateParams();
 
+		int num_changed = 0;
+
+		if (_param_sys_vehicle_resp.get() >= 0.f) {
+			// make it less sensitive at the lower end
+			float responsiveness = _param_sys_vehicle_resp.get() * _param_sys_vehicle_resp.get();
+
+			num_changed += _param_mpc_acc_hor.commit_no_notification(math::lerp(1.f, 15.f, responsiveness));
+			num_changed += _param_mpc_acc_hor_max.commit_no_notification(math::lerp(2.f, 15.f, responsiveness));
+			num_changed += _param_mpc_man_y_max.commit_no_notification(math::lerp(80.f, 450.f, responsiveness));
+
+			if (responsiveness > 0.6f) {
+				num_changed += _param_mpc_man_y_tau.commit_no_notification(0.f);
+
+			} else {
+				num_changed += _param_mpc_man_y_tau.commit_no_notification(math::lerp(0.5f, 0.f, responsiveness / 0.6f));
+			}
+
+			if (responsiveness < 0.5f) {
+				num_changed += _param_mpc_tiltmax_air.commit_no_notification(45.f);
+
+			} else {
+				num_changed += _param_mpc_tiltmax_air.commit_no_notification(math::min(MAX_SAFE_TILT_DEG, math::lerp(45.f, 70.f,
+						(responsiveness - 0.5f) * 2.f)));
+			}
+
+			num_changed += _param_mpc_acc_down_max.commit_no_notification(math::lerp(0.8f, 15.f, responsiveness));
+			num_changed += _param_mpc_acc_up_max.commit_no_notification(math::lerp(1.f, 15.f, responsiveness));
+			num_changed += _param_mpc_jerk_max.commit_no_notification(math::lerp(2.f, 50.f, responsiveness));
+			num_changed += _param_mpc_jerk_auto.commit_no_notification(math::lerp(1.f, 25.f, responsiveness));
+		}
+
+		if (_param_mpc_xy_vel_all.get() >= 0.f) {
+			float xy_vel = _param_mpc_xy_vel_all.get();
+			num_changed += _param_mpc_vel_manual.commit_no_notification(xy_vel);
+			num_changed += _param_mpc_vel_man_back.commit_no_notification(-1.f);
+			num_changed += _param_mpc_vel_man_side.commit_no_notification(-1.f);
+			num_changed += _param_mpc_xy_cruise.commit_no_notification(xy_vel);
+			num_changed += _param_mpc_xy_vel_max.commit_no_notification(xy_vel);
+		}
+
+		if (_param_mpc_z_vel_all.get() >= 0.f) {
+			float z_vel = _param_mpc_z_vel_all.get();
+			num_changed += _param_mpc_z_v_auto_up.commit_no_notification(z_vel);
+			num_changed += _param_mpc_z_vel_max_up.commit_no_notification(z_vel);
+			num_changed += _param_mpc_z_v_auto_dn.commit_no_notification(z_vel * 0.75f);
+			num_changed += _param_mpc_z_vel_max_dn.commit_no_notification(z_vel * 0.75f);
+			num_changed += _param_mpc_tko_speed.commit_no_notification(z_vel * 0.6f);
+			num_changed += _param_mpc_land_speed.commit_no_notification(z_vel * 0.5f);
+		}
+
+		if (num_changed > 0) {
+			param_notify_changes();
+		}
+
 		if (_param_mpc_tiltmax_air.get() > MAX_SAFE_TILT_DEG) {
 			_param_mpc_tiltmax_air.set(MAX_SAFE_TILT_DEG);
 			_param_mpc_tiltmax_air.commit();
-			mavlink_log_critical(&_mavlink_log_pub, "Tilt constrained to safe value");
+			mavlink_log_critical(&_mavlink_log_pub, "Tilt constrained to safe value\t");
+			/* EVENT
+			 * @description <param>MPC_TILTMAX_AIR</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_tilt_set"), events::Log::Warning,
+					    "Maximum tilt limit has been constrained to a safe value", MAX_SAFE_TILT_DEG);
 		}
 
 		if (_param_mpc_tiltmax_lnd.get() > _param_mpc_tiltmax_air.get()) {
 			_param_mpc_tiltmax_lnd.set(_param_mpc_tiltmax_air.get());
 			_param_mpc_tiltmax_lnd.commit();
-			mavlink_log_critical(&_mavlink_log_pub, "Land tilt has been constrained by max tilt");
+			mavlink_log_critical(&_mavlink_log_pub, "Land tilt has been constrained by max tilt\t");
+			/* EVENT
+			 * @description <param>MPC_TILTMAX_LND</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_land_tilt_set"), events::Log::Warning,
+					    "Land tilt limit has been constrained by maximum tilt", _param_mpc_tiltmax_air.get());
 		}
 
 		_control.setPositionGains(Vector3f(_param_mpc_xy_p.get(), _param_mpc_xy_p.get(), _param_mpc_z_p.get()));
@@ -106,21 +166,73 @@ int MulticopterPositionControl::parameters_update(bool force)
 			Vector3f(_param_mpc_xy_vel_p_acc.get(), _param_mpc_xy_vel_p_acc.get(), _param_mpc_z_vel_p_acc.get()),
 			Vector3f(_param_mpc_xy_vel_i_acc.get(), _param_mpc_xy_vel_i_acc.get(), _param_mpc_z_vel_i_acc.get()),
 			Vector3f(_param_mpc_xy_vel_d_acc.get(), _param_mpc_xy_vel_d_acc.get(), _param_mpc_z_vel_d_acc.get()));
-		_control.setVelocityLimits(_param_mpc_xy_vel_max.get(), _param_mpc_z_vel_max_up.get(), _param_mpc_z_vel_max_dn.get());
-		_control.setThrustLimits(_param_mpc_thr_min.get(), _param_mpc_thr_max.get());
-		_control.setTiltLimit(M_DEG_TO_RAD_F * _param_mpc_tiltmax_air.get()); // convert to radians!
+		_control.setHorizontalThrustMargin(_param_mpc_thr_xy_marg.get());
 
 		// Check that the design parameters are inside the absolute maximum constraints
 		if (_param_mpc_xy_cruise.get() > _param_mpc_xy_vel_max.get()) {
 			_param_mpc_xy_cruise.set(_param_mpc_xy_vel_max.get());
 			_param_mpc_xy_cruise.commit();
-			mavlink_log_critical(&_mavlink_log_pub, "Cruise speed has been constrained by max speed");
+			mavlink_log_critical(&_mavlink_log_pub, "Cruise speed has been constrained by max speed\t");
+			/* EVENT
+			 * @description <param>MPC_XY_CRUISE</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_cruise_set"), events::Log::Warning,
+					    "Cruise speed has been constrained by maximum speed", _param_mpc_xy_vel_max.get());
 		}
 
 		if (_param_mpc_vel_manual.get() > _param_mpc_xy_vel_max.get()) {
 			_param_mpc_vel_manual.set(_param_mpc_xy_vel_max.get());
 			_param_mpc_vel_manual.commit();
-			mavlink_log_critical(&_mavlink_log_pub, "Manual speed has been constrained by max speed");
+			mavlink_log_critical(&_mavlink_log_pub, "Manual speed has been constrained by max speed\t");
+			/* EVENT
+			 * @description <param>MPC_VEL_MANUAL</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_man_vel_set"), events::Log::Warning,
+					    "Manual speed has been constrained by maximum speed", _param_mpc_xy_vel_max.get());
+		}
+
+		if (_param_mpc_vel_man_back.get() > _param_mpc_vel_manual.get()) {
+			_param_mpc_vel_man_back.set(_param_mpc_vel_manual.get());
+			_param_mpc_vel_man_back.commit();
+			mavlink_log_critical(&_mavlink_log_pub, "Manual backward speed has been constrained by forward speed\t");
+			/* EVENT
+			 * @description <param>MPC_VEL_MAN_BACK</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_man_vel_back_set"), events::Log::Warning,
+					    "Manual backward speed has been constrained by forward speed", _param_mpc_vel_manual.get());
+		}
+
+		if (_param_mpc_vel_man_side.get() > _param_mpc_vel_manual.get()) {
+			_param_mpc_vel_man_side.set(_param_mpc_vel_manual.get());
+			_param_mpc_vel_man_side.commit();
+			mavlink_log_critical(&_mavlink_log_pub, "Manual sideways speed has been constrained by forward speed\t");
+			/* EVENT
+			 * @description <param>MPC_VEL_MAN_SIDE</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_man_vel_side_set"), events::Log::Warning,
+					    "Manual sideways speed has been constrained by forward speed", _param_mpc_vel_manual.get());
+		}
+
+		if (_param_mpc_z_v_auto_up.get() > _param_mpc_z_vel_max_up.get()) {
+			_param_mpc_z_v_auto_up.set(_param_mpc_z_vel_max_up.get());
+			_param_mpc_z_v_auto_up.commit();
+			mavlink_log_critical(&_mavlink_log_pub, "Ascent speed has been constrained by max speed\t");
+			/* EVENT
+			 * @description <param>MPC_Z_V_AUTO_UP</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_up_vel_set"), events::Log::Warning,
+					    "Ascent speed has been constrained by max speed", _param_mpc_z_vel_max_up.get());
+		}
+
+		if (_param_mpc_z_v_auto_dn.get() > _param_mpc_z_vel_max_dn.get()) {
+			_param_mpc_z_v_auto_dn.set(_param_mpc_z_vel_max_dn.get());
+			_param_mpc_z_v_auto_dn.commit();
+			mavlink_log_critical(&_mavlink_log_pub, "Descent speed has been constrained by max speed\t");
+			/* EVENT
+			 * @description <param>MPC_Z_V_AUTO_DN</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_down_vel_set"), events::Log::Warning,
+					    "Descent speed has been constrained by max speed", _param_mpc_z_vel_max_dn.get());
 		}
 
 		if (_param_mpc_thr_hover.get() > _param_mpc_thr_max.get() ||
@@ -128,7 +240,12 @@ int MulticopterPositionControl::parameters_update(bool force)
 			_param_mpc_thr_hover.set(math::constrain(_param_mpc_thr_hover.get(), _param_mpc_thr_min.get(),
 						 _param_mpc_thr_max.get()));
 			_param_mpc_thr_hover.commit();
-			mavlink_log_critical(&_mavlink_log_pub, "Hover thrust has been constrained by min/max");
+			mavlink_log_critical(&_mavlink_log_pub, "Hover thrust has been constrained by min/max\t");
+			/* EVENT
+			 * @description <param>MPC_THR_HOVER</param> is set to {1:.0}.
+			 */
+			events::send<float>(events::ID("mc_pos_ctrl_hover_thrust_set"), events::Log::Warning,
+					    "Hover thrust has been constrained by min/max thrust", _param_mpc_thr_hover.get());
 		}
 
 		if (!_param_mpc_use_hte.get() || !_hover_thrust_initialized) {
@@ -139,79 +256,66 @@ int MulticopterPositionControl::parameters_update(bool force)
 		// initialize vectors from params and enforce constraints
 		_param_mpc_tko_speed.set(math::min(_param_mpc_tko_speed.get(), _param_mpc_z_vel_max_up.get()));
 		_param_mpc_land_speed.set(math::min(_param_mpc_land_speed.get(), _param_mpc_z_vel_max_dn.get()));
-	}
 
-	return OK;
-}
-
-void MulticopterPositionControl::poll_subscriptions()
-{
-	_control_mode_sub.update(&_control_mode);
-
-	if (_param_mpc_use_hte.get()) {
-		hover_thrust_estimate_s hte;
-
-		if (_hover_thrust_estimate_sub.update(&hte)) {
-			if (hte.valid) {
-				_control.updateHoverThrust(hte.hover_thrust);
-			}
-		}
+		_takeoff.setSpoolupTime(_param_com_spoolup_time.get());
+		_takeoff.setTakeoffRampTime(_param_mpc_tko_ramp_t.get());
+		_takeoff.generateInitialRampValue(_param_mpc_z_vel_p_acc.get());
 	}
 }
 
-void MulticopterPositionControl::set_vehicle_states(const float &vel_sp_z)
+PositionControlStates MulticopterPositionControl::set_vehicle_states(const vehicle_local_position_s
+		&vehicle_local_position)
 {
+	PositionControlStates states;
+
+	const Vector2f position_xy(vehicle_local_position.x, vehicle_local_position.y);
+
 	// only set position states if valid and finite
-	if (PX4_ISFINITE(_local_pos.x) && PX4_ISFINITE(_local_pos.y) && _local_pos.xy_valid) {
-		_states.position(0) = _local_pos.x;
-		_states.position(1) = _local_pos.y;
+	if (vehicle_local_position.xy_valid && position_xy.isAllFinite()) {
+		states.position.xy() = position_xy;
 
 	} else {
-		_states.position(0) = _states.position(1) = NAN;
+		states.position(0) = states.position(1) = NAN;
 	}
 
-	if (PX4_ISFINITE(_local_pos.z) && _local_pos.z_valid) {
-		_states.position(2) = _local_pos.z;
+	if (PX4_ISFINITE(vehicle_local_position.z) && vehicle_local_position.z_valid) {
+		states.position(2) = vehicle_local_position.z;
 
 	} else {
-		_states.position(2) = NAN;
+		states.position(2) = NAN;
 	}
 
-	if (PX4_ISFINITE(_local_pos.vx) && PX4_ISFINITE(_local_pos.vy) && _local_pos.v_xy_valid) {
-		_states.velocity(0) = _local_pos.vx;
-		_states.velocity(1) = _local_pos.vy;
-		_states.acceleration(0) = _vel_x_deriv.update(_states.velocity(0));
-		_states.acceleration(1) = _vel_y_deriv.update(_states.velocity(1));
+	const Vector2f velocity_xy(vehicle_local_position.vx, vehicle_local_position.vy);
+
+	if (vehicle_local_position.v_xy_valid && velocity_xy.isAllFinite()) {
+		states.velocity.xy() = velocity_xy;
+		states.acceleration(0) = _vel_x_deriv.update(velocity_xy(0));
+		states.acceleration(1) = _vel_y_deriv.update(velocity_xy(1));
 
 	} else {
-		_states.velocity(0) = _states.velocity(1) = NAN;
-		_states.acceleration(0) = _states.acceleration(1) = NAN;
+		states.velocity(0) = states.velocity(1) = NAN;
+		states.acceleration(0) = states.acceleration(1) = NAN;
+
 		// reset derivatives to prevent acceleration spikes when regaining velocity
 		_vel_x_deriv.reset();
 		_vel_y_deriv.reset();
 	}
 
-	if (PX4_ISFINITE(_local_pos.vz) && _local_pos.v_z_valid) {
-		_states.velocity(2) = _local_pos.vz;
-
-		if (PX4_ISFINITE(vel_sp_z) && fabsf(vel_sp_z) > FLT_EPSILON && PX4_ISFINITE(_local_pos.z_deriv)) {
-			// A change in velocity is demanded. Set velocity to the derivative of position
-			// because it has less bias but blend it in across the landing speed range
-			float weighting = fminf(fabsf(vel_sp_z) / _param_mpc_land_speed.get(), 1.0f);
-			_states.velocity(2) = _local_pos.z_deriv * weighting + _local_pos.vz * (1.0f - weighting);
-		}
-
-		_states.acceleration(2) = _vel_z_deriv.update(_states.velocity(2));
+	if (PX4_ISFINITE(vehicle_local_position.vz) && vehicle_local_position.v_z_valid) {
+		states.velocity(2) = vehicle_local_position.vz;
+		states.acceleration(2) = _vel_z_deriv.update(states.velocity(2));
 
 	} else {
-		_states.velocity(2) = _states.acceleration(2) = NAN;
+		states.velocity(2) = NAN;
+		states.acceleration(2) = NAN;
+
 		// reset derivative to prevent acceleration spikes when regaining velocity
 		_vel_z_deriv.reset();
 	}
 
-	if (PX4_ISFINITE(_local_pos.heading)) {
-		_states.yaw = _local_pos.heading;
-	}
+	states.yaw = vehicle_local_position.heading;
+
+	return states;
 }
 
 void MulticopterPositionControl::Run()
@@ -222,56 +326,223 @@ void MulticopterPositionControl::Run()
 		return;
 	}
 
+	// reschedule backup
+	ScheduleDelayed(100_ms);
+
+	parameters_update(false);
+
 	perf_begin(_cycle_perf);
+	vehicle_local_position_s vehicle_local_position;
 
-	if (_local_pos_sub.update(&_local_pos)) {
-
-		poll_subscriptions();
-		parameters_update(false);
-
-		const hrt_abstime time_stamp_now = _local_pos.timestamp;
-		const float dt = math::constrain(((time_stamp_now - _time_stamp_last_loop) * 1e-6f), 0.002f, 0.04f);
-		_time_stamp_last_loop = time_stamp_now;
+	if (_local_pos_sub.update(&vehicle_local_position)) {
+		const float dt =
+			math::constrain(((vehicle_local_position.timestamp_sample - _time_stamp_last_loop) * 1e-6f), 0.002f, 0.04f);
+		_time_stamp_last_loop = vehicle_local_position.timestamp_sample;
 
 		// set _dt in controllib Block for BlockDerivative
 		setDt(dt);
 
-		const bool was_in_failsafe = _in_failsafe;
-		_in_failsafe = false;
+		if (_vehicle_control_mode_sub.updated()) {
+			const bool previous_position_control_enabled = _vehicle_control_mode.flag_multicopter_position_control_enabled;
 
-		vehicle_local_position_setpoint_s setpoint;
+			if (_vehicle_control_mode_sub.update(&_vehicle_control_mode)) {
+				if (!previous_position_control_enabled && _vehicle_control_mode.flag_multicopter_position_control_enabled) {
+					_time_position_control_enabled = _vehicle_control_mode.timestamp;
 
-		// check if any task is active
-		if (_trajectory_setpoint_sub.update(&setpoint)) {
-			_control.setInputSetpoint(setpoint);
+				} else if (previous_position_control_enabled && !_vehicle_control_mode.flag_multicopter_position_control_enabled) {
+					// clear existing setpoint when controller is no longer active
+					_setpoint = PositionControl::empty_trajectory_setpoint;
+				}
+			}
+		}
 
-			// check if all local states are valid and map accordingly
-			set_vehicle_states(setpoint.vz);
-			_control.setState(_states);
+		_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 
-			vehicle_constraints_s constraints;
-			_vehicle_constraints_sub.update(&constraints);
-			_control.setConstraints(constraints);
-			_control.setThrustLimits(constraints.minimum_thrust, _param_mpc_thr_max.get());
+		if (_param_mpc_use_hte.get()) {
+			hover_thrust_estimate_s hte;
 
-			if (constraints.reset_integral) {
+			if (_hover_thrust_estimate_sub.update(&hte)) {
+				if (hte.valid) {
+					_control.updateHoverThrust(hte.hover_thrust);
+				}
+			}
+		}
+
+		_trajectory_setpoint_sub.update(&_setpoint);
+
+		// adjust existing (or older) setpoint with any EKF reset deltas
+		if ((_setpoint.timestamp != 0) && (_setpoint.timestamp < vehicle_local_position.timestamp)) {
+			if (vehicle_local_position.vxy_reset_counter != _vxy_reset_counter) {
+				_setpoint.velocity[0] += vehicle_local_position.delta_vxy[0];
+				_setpoint.velocity[1] += vehicle_local_position.delta_vxy[1];
+			}
+
+			if (vehicle_local_position.vz_reset_counter != _vz_reset_counter) {
+				_setpoint.velocity[2] += vehicle_local_position.delta_vz;
+			}
+
+			if (vehicle_local_position.xy_reset_counter != _xy_reset_counter) {
+				_setpoint.position[0] += vehicle_local_position.delta_xy[0];
+				_setpoint.position[1] += vehicle_local_position.delta_xy[1];
+			}
+
+			if (vehicle_local_position.z_reset_counter != _z_reset_counter) {
+				_setpoint.position[2] += vehicle_local_position.delta_z;
+			}
+
+			if (vehicle_local_position.heading_reset_counter != _heading_reset_counter) {
+				_setpoint.yaw = wrap_pi(_setpoint.yaw + vehicle_local_position.delta_heading);
+			}
+		}
+
+		if (vehicle_local_position.vxy_reset_counter != _vxy_reset_counter) {
+			_vel_x_deriv.reset();
+			_vel_y_deriv.reset();
+		}
+
+		if (vehicle_local_position.vz_reset_counter != _vz_reset_counter) {
+			_vel_z_deriv.reset();
+		}
+
+		// save latest reset counters
+		_vxy_reset_counter = vehicle_local_position.vxy_reset_counter;
+		_vz_reset_counter = vehicle_local_position.vz_reset_counter;
+		_xy_reset_counter = vehicle_local_position.xy_reset_counter;
+		_z_reset_counter = vehicle_local_position.z_reset_counter;
+		_heading_reset_counter = vehicle_local_position.heading_reset_counter;
+
+
+		PositionControlStates states{set_vehicle_states(vehicle_local_position)};
+
+
+		if (_vehicle_control_mode.flag_multicopter_position_control_enabled) {
+			// set failsafe setpoint if there hasn't been a new
+			// trajectory setpoint since position control started
+			if ((_setpoint.timestamp < _time_position_control_enabled)
+			    && (vehicle_local_position.timestamp_sample > _time_position_control_enabled)) {
+
+				_setpoint = generateFailsafeSetpoint(vehicle_local_position.timestamp_sample, states, false);
+			}
+		}
+
+		if (_vehicle_control_mode.flag_multicopter_position_control_enabled
+		    && (_setpoint.timestamp >= _time_position_control_enabled)) {
+
+			// update vehicle constraints and handle smooth takeoff
+			_vehicle_constraints_sub.update(&_vehicle_constraints);
+
+			// fix to prevent the takeoff ramp to ramp to a too high value or get stuck because of NAN
+			// TODO: this should get obsolete once the takeoff limiting moves into the flight tasks
+			if (!PX4_ISFINITE(_vehicle_constraints.speed_up) || (_vehicle_constraints.speed_up > _param_mpc_z_vel_max_up.get())) {
+				_vehicle_constraints.speed_up = _param_mpc_z_vel_max_up.get();
+			}
+
+			if (_vehicle_control_mode.flag_control_offboard_enabled) {
+
+				const bool want_takeoff = _vehicle_control_mode.flag_armed
+							  && (vehicle_local_position.timestamp_sample < _setpoint.timestamp + 1_s);
+
+				if (want_takeoff && PX4_ISFINITE(_setpoint.position[2])
+				    && (_setpoint.position[2] < states.position(2))) {
+
+					_vehicle_constraints.want_takeoff = true;
+
+				} else if (want_takeoff && PX4_ISFINITE(_setpoint.velocity[2])
+					   && (_setpoint.velocity[2] < 0.f)) {
+
+					_vehicle_constraints.want_takeoff = true;
+
+				} else if (want_takeoff && PX4_ISFINITE(_setpoint.acceleration[2])
+					   && (_setpoint.acceleration[2] < 0.f)) {
+
+					_vehicle_constraints.want_takeoff = true;
+
+				} else {
+					_vehicle_constraints.want_takeoff = false;
+				}
+
+				// override with defaults
+				_vehicle_constraints.speed_up = _param_mpc_z_vel_max_up.get();
+				_vehicle_constraints.speed_down = _param_mpc_z_vel_max_dn.get();
+			}
+
+			// handle smooth takeoff
+			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed,
+						    _vehicle_constraints.want_takeoff,
+						    _vehicle_constraints.speed_up, false, vehicle_local_position.timestamp_sample);
+
+			const bool not_taken_off             = (_takeoff.getTakeoffState() < TakeoffState::rampup);
+			const bool flying                    = (_takeoff.getTakeoffState() >= TakeoffState::flight);
+			const bool flying_but_ground_contact = (flying && _vehicle_land_detected.ground_contact);
+
+			if (!flying) {
+				_control.setHoverThrust(_param_mpc_thr_hover.get());
+			}
+
+			// make sure takeoff ramp is not amended by acceleration feed-forward
+			if (_takeoff.getTakeoffState() == TakeoffState::rampup && PX4_ISFINITE(_setpoint.velocity[2])) {
+				_setpoint.acceleration[2] = NAN;
+			}
+
+			if (not_taken_off || flying_but_ground_contact) {
+				// we are not flying yet and need to avoid any corrections
+				_setpoint = PositionControl::empty_trajectory_setpoint;
+				_setpoint.timestamp = vehicle_local_position.timestamp_sample;
+				Vector3f(0.f, 0.f, 100.f).copyTo(_setpoint.acceleration); // High downwards acceleration to make sure there's no thrust
+
+				// prevent any integrator windup
 				_control.resetIntegral();
 			}
 
+			// limit tilt during takeoff ramupup
+			const float tilt_limit_deg = (_takeoff.getTakeoffState() < TakeoffState::flight)
+						     ? _param_mpc_tiltmax_lnd.get() : _param_mpc_tiltmax_air.get();
+			_control.setTiltLimit(_tilt_limit_slew_rate.update(math::radians(tilt_limit_deg), dt));
+
+			const float speed_up = _takeoff.updateRamp(dt,
+					       PX4_ISFINITE(_vehicle_constraints.speed_up) ? _vehicle_constraints.speed_up : _param_mpc_z_vel_max_up.get());
+			const float speed_down = PX4_ISFINITE(_vehicle_constraints.speed_down) ? _vehicle_constraints.speed_down :
+						 _param_mpc_z_vel_max_dn.get();
+
+			// Allow ramping from zero thrust on takeoff
+			const float minimum_thrust = flying ? _param_mpc_thr_min.get() : 0.f;
+			_control.setThrustLimits(minimum_thrust, _param_mpc_thr_max.get());
+
+			float max_speed_xy = _param_mpc_xy_vel_max.get();
+
+			if (PX4_ISFINITE(vehicle_local_position.vxy_max)) {
+				max_speed_xy = math::min(max_speed_xy, vehicle_local_position.vxy_max);
+			}
+
+			_control.setVelocityLimits(
+				max_speed_xy,
+				math::min(speed_up, _param_mpc_z_vel_max_up.get()), // takeoff ramp starts with negative velocity limit
+				math::max(speed_down, 0.f));
+
+			_control.setInputSetpoint(_setpoint);
+
+			// update states
+			if (!PX4_ISFINITE(_setpoint.position[2])
+			    && PX4_ISFINITE(_setpoint.velocity[2]) && (fabsf(_setpoint.velocity[2]) > FLT_EPSILON)
+			    && PX4_ISFINITE(vehicle_local_position.z_deriv) && vehicle_local_position.z_valid && vehicle_local_position.v_z_valid) {
+				// A change in velocity is demanded and the altitude is not controlled.
+				// Set velocity to the derivative of position
+				// because it has less bias but blend it in across the landing speed range
+				//  <  MPC_LAND_SPEED: ramp up using altitude derivative without a step
+				//  >= MPC_LAND_SPEED: use altitude derivative
+				float weighting = fminf(fabsf(_setpoint.velocity[2]) / _param_mpc_land_speed.get(), 1.f);
+				states.velocity(2) = vehicle_local_position.z_deriv * weighting + vehicle_local_position.vz * (1.f - weighting);
+			}
+
+			_control.setState(states);
+
 			// Run position control
-			if (_control.update(dt)) {
-				_failsafe_land_hysteresis.set_state_and_update(false, time_stamp_now);
-
-			} else {
+			if (!_control.update(dt)) {
 				// Failsafe
-				if ((time_stamp_now - _last_warn) > 2_s) {
-					PX4_WARN("invalid setpoints");
-					_last_warn = time_stamp_now;
-				}
+				_vehicle_constraints = {0, NAN, NAN, false, {}}; // reset constraints
 
-				failsafe(time_stamp_now, setpoint, _states, !was_in_failsafe);
-				_control.setInputSetpoint(setpoint);
-				constraints = FlightTask::empty_constraints;
+				_control.setInputSetpoint(generateFailsafeSetpoint(vehicle_local_position.timestamp_sample, states, true));
+				_control.setVelocityLimits(_param_mpc_xy_vel_max.get(), _param_mpc_z_vel_max_up.get(), _param_mpc_z_vel_max_dn.get());
 				_control.update(dt);
 			}
 
@@ -279,90 +550,86 @@ void MulticopterPositionControl::Run()
 			// on top of the input/feed-forward setpoints these containt the PID corrections
 			// This message is used by other modules (such as Landdetector) to determine vehicle intention.
 			vehicle_local_position_setpoint_s local_pos_sp{};
-			local_pos_sp.timestamp = time_stamp_now;
 			_control.getLocalPositionSetpoint(local_pos_sp);
+			local_pos_sp.timestamp = hrt_absolute_time();
 			_local_pos_sp_pub.publish(local_pos_sp);
 
 			// Publish attitude setpoint output
-			// It's important to publish also when disarmed otheriwse the attitude setpoint stays uninitialized.
-			// Not publishing when not running a flight task
-			// in stabilized mode attitude setpoints get ignored
-			// in offboard with attitude setpoints they come from MAVLink directly
 			vehicle_attitude_setpoint_s attitude_setpoint{};
-			attitude_setpoint.timestamp = time_stamp_now;
 			_control.getAttitudeSetpoint(attitude_setpoint);
+			attitude_setpoint.timestamp = hrt_absolute_time();
 			_vehicle_attitude_setpoint_pub.publish(attitude_setpoint);
 
 		} else {
-			// reset the numerical derivatives to not generate d term spikes when coming from non-position controlled operation
-			_vel_x_deriv.reset();
-			_vel_y_deriv.reset();
-			_vel_z_deriv.reset();
+			// an update is necessary here because otherwise the takeoff state doesn't get skipped with non-altitude-controlled modes
+			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
+						    vehicle_local_position.timestamp_sample);
+		}
+
+		// Publish takeoff status
+		const uint8_t takeoff_state = static_cast<uint8_t>(_takeoff.getTakeoffState());
+
+		if (takeoff_state != _takeoff_status_pub.get().takeoff_state
+		    || !isEqualF(_tilt_limit_slew_rate.getState(), _takeoff_status_pub.get().tilt_limit)) {
+			_takeoff_status_pub.get().takeoff_state = takeoff_state;
+			_takeoff_status_pub.get().tilt_limit = _tilt_limit_slew_rate.getState();
+			_takeoff_status_pub.get().timestamp = hrt_absolute_time();
+			_takeoff_status_pub.update();
 		}
 	}
 
 	perf_end(_cycle_perf);
 }
 
-void MulticopterPositionControl::failsafe(const hrt_abstime &now, vehicle_local_position_setpoint_s &setpoint,
+trajectory_setpoint_s MulticopterPositionControl::generateFailsafeSetpoint(const hrt_abstime &now,
 		const PositionControlStates &states, bool warn)
 {
-	// do not warn while we are disarmed, as we might not have valid setpoints yet
-	if (!_control_mode.flag_armed) {
-		warn = false;
+	// rate limit the warnings
+	warn = warn && (now - _last_warn) > 2_s;
+
+	if (warn) {
+		PX4_WARN("invalid setpoints");
+		_last_warn = now;
 	}
 
-	// Only react after a short delay
-	_failsafe_land_hysteresis.set_state_and_update(true, now);
+	trajectory_setpoint_s failsafe_setpoint = PositionControl::empty_trajectory_setpoint;
+	failsafe_setpoint.timestamp = now;
 
-	if (_failsafe_land_hysteresis.get_state()) {
-		reset_setpoint_to_nan(setpoint);
+	if (Vector2f(states.velocity).isAllFinite()) {
+		// don't move along xy
+		failsafe_setpoint.velocity[0] = failsafe_setpoint.velocity[1] = 0.f;
 
-		if (PX4_ISFINITE(_states.velocity(0)) && PX4_ISFINITE(_states.velocity(1))) {
-			// don't move along xy
-			setpoint.vx = setpoint.vy = 0.f;
-
-			if (warn) {
-				PX4_WARN("Failsafe: stop and wait");
-			}
-
-		} else {
-			// descend with land speed since we can't stop
-			setpoint.acceleration[0] = setpoint.acceleration[1] = 0.f;
-			setpoint.vz = _param_mpc_land_speed.get();
-
-			if (warn) {
-				PX4_WARN("Failsafe: blind land");
-			}
+		if (warn) {
+			PX4_WARN("Failsafe: stop and wait");
 		}
 
-		if (PX4_ISFINITE(_states.velocity(2))) {
-			// don't move along z if we can stop in all dimensions
-			if (!PX4_ISFINITE(setpoint.vz)) {
-				setpoint.vz = 0.f;
-			}
+	} else {
+		// descend with land speed since we can't stop
+		failsafe_setpoint.acceleration[0] = failsafe_setpoint.acceleration[1] = 0.f;
+		failsafe_setpoint.velocity[2] = _param_mpc_land_speed.get();
 
-		} else {
-			// emergency descend with a bit below hover thrust
-			setpoint.vz = NAN;
-			setpoint.acceleration[2] = .3f;
-
-			if (warn) {
-				PX4_WARN("Failsafe: blind descend");
-			}
+		if (warn) {
+			PX4_WARN("Failsafe: blind land");
 		}
-
-		_in_failsafe = true;
 	}
-}
 
-void MulticopterPositionControl::reset_setpoint_to_nan(vehicle_local_position_setpoint_s &setpoint)
-{
-	setpoint.x = setpoint.y = setpoint.z = NAN;
-	setpoint.vx = setpoint.vy = setpoint.vz = NAN;
-	setpoint.yaw = setpoint.yawspeed = NAN;
-	setpoint.acceleration[0] = setpoint.acceleration[1] = setpoint.acceleration[2] = NAN;
-	setpoint.thrust[0] = setpoint.thrust[1] = setpoint.thrust[2] = NAN;
+	if (PX4_ISFINITE(states.velocity(2))) {
+		// don't move along z if we can stop in all dimensions
+		if (!PX4_ISFINITE(failsafe_setpoint.velocity[2])) {
+			failsafe_setpoint.velocity[2] = 0.f;
+		}
+
+	} else {
+		// emergency descend with a bit below hover thrust
+		failsafe_setpoint.velocity[2] = NAN;
+		failsafe_setpoint.acceleration[2] = .3f;
+
+		if (warn) {
+			PX4_WARN("Failsafe: blind descent");
+		}
+	}
+
+	return failsafe_setpoint;
 }
 
 int MulticopterPositionControl::task_spawn(int argc, char *argv[])

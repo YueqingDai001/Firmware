@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2013-2014 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2013-2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -46,6 +46,7 @@
 #include <px4_platform_common/px4_mtd.h>
 #include <px4_platform_common/getopt.h>
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -79,11 +80,11 @@ static int mtd_status(void)
 	bool running = false;
 	unsigned int num_instances;
 
-	const mtd_instance_s *instances = px4_mtd_get_instances(&num_instances);
+	mtd_instance_s **instances = px4_mtd_get_instances(&num_instances);
 
 	if (instances) {
 		for (unsigned int i = 0; i < num_instances; ++i) {
-			if (instances[i].mtd_dev) {
+			if (instances[i]->mtd_dev) {
 
 				unsigned long blocksize;
 				unsigned long erasesize;
@@ -92,7 +93,7 @@ static int mtd_status(void)
 				unsigned int  nblocks;
 				unsigned int  partsize;
 
-				ret = px4_mtd_get_geometry(&instances[i], &blocksize, &erasesize, &neraseblocks, &blkpererase, &nblocks, &partsize);
+				ret = px4_mtd_get_geometry(instances[i], &blocksize, &erasesize, &neraseblocks, &blkpererase, &nblocks, &partsize);
 
 				if (ret == 0) {
 
@@ -101,18 +102,18 @@ static int mtd_status(void)
 					printf("  blocksize:      %lu\n", blocksize);
 					printf("  erasesize:      %lu\n", erasesize);
 					printf("  neraseblocks:   %lu\n", neraseblocks);
-					printf("  No. partitions: %u\n", instances[i].n_partitions_current);
+					printf("  No. partitions: %u\n", instances[i]->n_partitions_current);
 
 
 					unsigned int  totalnblocks = 0;
 					unsigned int  totalpartsize = 0;
 
-					for (unsigned int p = 0; p < instances[i].n_partitions_current; p++) {
+					for (unsigned int p = 0; p < instances[i]->n_partitions_current; p++) {
 						FAR struct mtd_geometry_s geo;
-						ret = instances[i].part_dev[p]->ioctl(instances[i].part_dev[p], MTDIOC_GEOMETRY, (unsigned long)((uintptr_t)&geo));
+						ret = instances[i]->part_dev[p]->ioctl(instances[i]->part_dev[p], MTDIOC_GEOMETRY, (unsigned long)((uintptr_t)&geo));
 						printf("    partition: %u:\n", p);
-						printf("     name:   %s\n", instances[i].partition_names[p]);
-						printf("     blocks: %u (%u bytes)\n", geo.neraseblocks, erasesize * geo.neraseblocks);
+						printf("     name:   %s\n", instances[i]->partition_names[p]);
+						printf("     blocks: %" PRIu32 " (%lu bytes)\n", geo.neraseblocks, erasesize * geo.neraseblocks);
 						totalnblocks += geo.neraseblocks;
 						totalpartsize += erasesize * geo.neraseblocks;
 					}
@@ -134,7 +135,7 @@ static int mtd_status(void)
 	return ret;
 }
 
-static void	print_usage(void)
+static void print_usage()
 {
 #if !defined(CONSTRAINED_FLASH)
 
@@ -175,7 +176,7 @@ int mtd_erase(mtd_instance_s &instance)
 			count += sizeof(v);
 		}
 
-		printf("Erased %lu bytes\n", (unsigned long)count);
+		printf("Erased %" PRIu32 " bytes\n", count);
 		close(fd);
 	}
 
@@ -203,7 +204,7 @@ int mtd_readtest(const mtd_instance_s &instance)
 			return 1;
 		}
 
-		printf("reading %s expecting %u bytes\n", instance.partition_names[i], expected_size);
+		printf("reading %s expecting %zd bytes\n", instance.partition_names[i], expected_size);
 		int fd = open(instance.partition_names[i], O_RDONLY);
 
 		if (fd == -1) {
@@ -216,7 +217,7 @@ int mtd_readtest(const mtd_instance_s &instance)
 		}
 
 		if (count != expected_size) {
-			PX4_ERR("Failed to read partition - got %u/%u bytes", count, expected_size);
+			PX4_ERR("Failed to read partition - got %zd/%zd bytes", count, expected_size);
 			return 1;
 		}
 
@@ -248,34 +249,72 @@ int mtd_rwtest(const mtd_instance_s &instance)
 			return 1;
 		}
 
-		printf("rwtest %s testing %u bytes\n", instance.partition_names[i], expected_size);
-		int fd = open(instance.partition_names[i], O_RDWR);
+		printf("rwtest %s testing %zd bytes\n", instance.partition_names[i], expected_size);
 
-		if (fd == -1) {
-			PX4_ERR("Failed to open partition");
-			return 1;
-		}
+		bool run = true;
 
-		while (read(fd, v, sizeof(v)) == sizeof(v)) {
+		while (run) {
+
+			int fd = open(instance.partition_names[i], O_RDWR);
+
+			if (fd == -1) {
+				PX4_ERR("Failed to open partition");
+				return 1;
+			}
+
+			if (read(fd, v, sizeof(v)) != sizeof(v)) {
+				PX4_ERR("read failed");
+				close(fd);
+				return 1;
+			}
+
 			count += sizeof(v);
 
 			if (lseek(fd, offset, SEEK_SET) != offset) {
 				PX4_ERR("seek failed");
+				close(fd);
 				return 1;
 			}
 
 			if (write(fd, v, sizeof(v)) != sizeof(v)) {
 				PX4_ERR("write failed");
+				close(fd);
+				return 1;
+			}
+
+			//sync and close to discard data from the Block Device buffer
+			if (OK != fsync(fd)) {
+				PX4_ERR("Failed to fsync");
+				close(fd);
+				return 1;
+			}
+
+			if (OK != close(fd)) {
+				PX4_ERR("Failed to close partition");
+				return 1;
+			}
+
+			fd = open(instance.partition_names[i], O_RDONLY);
+
+			if (fd == -1) {
+				PX4_ERR("Failed to open partition");
 				return 1;
 			}
 
 			if (lseek(fd, offset, SEEK_SET) != offset) {
 				PX4_ERR("seek failed");
+				close(fd);
 				return 1;
 			}
 
 			if (read(fd, v2, sizeof(v2)) != sizeof(v2)) {
 				PX4_ERR("read failed");
+				close(fd);
+				return 1;
+			}
+
+			if (OK != close(fd)) {
+				PX4_ERR("Failed to close partition");
 				return 1;
 			}
 
@@ -285,14 +324,16 @@ int mtd_rwtest(const mtd_instance_s &instance)
 			}
 
 			offset += sizeof(v);
+
+			if (count >= expected_size) {
+				run = false;
+			}
 		}
 
 		if (count != expected_size) {
-			PX4_ERR("Failed to read partition - got %u/%u bytes", count, expected_size);
+			PX4_ERR("Failed to read partition - got %zd/%zd bytes", count, expected_size);
 			return 1;
 		}
-
-		close(fd);
 	}
 
 	printf("rwtest OK\n");
@@ -303,7 +344,7 @@ int mtd_rwtest(const mtd_instance_s &instance)
 int mtd_main(int argc, char *argv[])
 {
 	int myoptind = 1;
-	const char *myoptarg = NULL;
+	const char *myoptarg = nullptr;
 	int ch;
 	int instance = 0;
 
@@ -322,7 +363,7 @@ int mtd_main(int argc, char *argv[])
 
 	if (myoptind < argc) {
 		unsigned int num_instances;
-		mtd_instance_s *instances = px4_mtd_get_instances(&num_instances);
+		mtd_instance_s **instances = px4_mtd_get_instances(&num_instances);
 
 		if (instances == nullptr) {
 			PX4_ERR("Driver not running");
@@ -337,11 +378,11 @@ int mtd_main(int argc, char *argv[])
 #if !defined(CONSTRAINED_FLASH)
 
 		if (!strcmp(argv[myoptind], "readtest")) {
-			return mtd_readtest(instances[instance]);
+			return mtd_readtest(*instances[instance]);
 		}
 
 		if (!strcmp(argv[myoptind], "rwtest")) {
-			return mtd_rwtest(instances[instance]);
+			return mtd_rwtest(*instances[instance]);
 		}
 
 #endif
@@ -351,7 +392,7 @@ int mtd_main(int argc, char *argv[])
 		}
 
 		if (!strcmp(argv[myoptind],  "erase")) {
-			return mtd_erase(instances[instance]);
+			return mtd_erase(*instances[instance]);
 		}
 	}
 

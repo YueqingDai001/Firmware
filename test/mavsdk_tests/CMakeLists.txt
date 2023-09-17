@@ -6,30 +6,32 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(MAVSDK REQUIRED)
+file(READ MAVSDK_VERSION MAVSDK_VERSION)
+string(STRIP ${MAVSDK_VERSION} MAVSDK_VERSION)
+
+find_package(MAVSDK "${MAVSDK_VERSION}" REQUIRED)
 find_package(Threads REQUIRED)
 
 if(MAVSDK_FOUND)
     add_executable(mavsdk_tests
         test_main.cpp
         autopilot_tester.cpp
+        autopilot_tester_failure.cpp
+        # follow-me needs a MAVSDK update:
+        # https://github.com/mavlink/MAVSDK/pull/1770
+        # autopilot_tester_follow_me.cpp
+        test_multicopter_control_allocation.cpp
+        test_multicopter_failure_injection.cpp
         test_multicopter_failsafe.cpp
         test_multicopter_mission.cpp
         test_multicopter_offboard.cpp
         test_multicopter_manual.cpp
         test_vtol_mission.cpp
+        # test_multicopter_follow_me.cpp
     )
 
     target_link_libraries(mavsdk_tests
         MAVSDK::mavsdk
-        MAVSDK::mavsdk_action
-        MAVSDK::mavsdk_failure
-        MAVSDK::mavsdk_info
-        MAVSDK::mavsdk_manual_control
-        MAVSDK::mavsdk_mission
-        MAVSDK::mavsdk_offboard
-        MAVSDK::mavsdk_param
-        MAVSDK::mavsdk_telemetry
         ${CMAKE_THREAD_LIBS_INIT}
     )
 

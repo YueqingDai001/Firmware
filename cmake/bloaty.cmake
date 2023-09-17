@@ -32,7 +32,7 @@
 ############################################################################
 
 find_program(BLOATY_PROGRAM bloaty)
-if (BLOATY_PROGRAM)
+if(BLOATY_PROGRAM)
 
 	set(BLOATY_OPTS --demangle=full --domain=vm -s vm -n 200 -w)
 
@@ -71,13 +71,22 @@ if (BLOATY_PROGRAM)
 		USES_TERMINAL
 		)
 
-	# bloaty compare with last master build
-	add_custom_target(bloaty_compare_master
-		COMMAND wget -c -N --no-verbose https://s3.amazonaws.com/px4-travis/Firmware/master/${PX4_BOARD_VENDOR}_${PX4_BOARD_MODEL}_${PX4_BOARD_LABEL}.elf -O master.elf
-		COMMAND ${BLOATY_PROGRAM} -d symbols ${BLOATY_OPTS} $<TARGET_FILE:px4> -- master.elf
+	# bloaty statically allocated RAM
+	add_custom_target(bloaty_ram
+		COMMAND ${BLOATY_PROGRAM} -c ${PX4_SOURCE_DIR}/Tools/bloaty_static_ram.bloaty -d bloaty_static_ram,compileunits --source-filter ^ram$ ${BLOATY_OPTS} $<TARGET_FILE:px4>
 		DEPENDS px4
-		WORKING_DIRECTORY ${PX4_BINARY_DIR}
-		VERBATIM
 		USES_TERMINAL
 		)
+
+	if(${PX4_PLATFORM} MATCHES "nuttx")
+		# bloaty compare with last master build
+		add_custom_target(bloaty_compare_master
+			COMMAND wget --continue --no-verbose https://s3.amazonaws.com/px4-travis/Firmware/master/${PX4_BOARD_VENDOR}_${PX4_BOARD_MODEL}_${PX4_BOARD_LABEL}.elf -O master.elf
+			COMMAND ${BLOATY_PROGRAM} -d symbols ${BLOATY_OPTS} $<TARGET_FILE:px4> -- master.elf
+			DEPENDS px4
+			WORKING_DIRECTORY ${PX4_BINARY_DIR}
+			VERBATIM
+			USES_TERMINAL
+			)
+	endif()
 endif()

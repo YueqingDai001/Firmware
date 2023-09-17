@@ -82,6 +82,10 @@
 #define BOARD_NUM_SPI_CFG_HW_VERSIONS 1
 #endif
 
+#ifndef BOARD_MTD_NUM_EEPROM
+#define BOARD_MTD_NUM_EEPROM 1
+#endif
+
 /* ADC defining tools
  * We want to normalize the V5 Sensing to V = (adc_dn) * ADC_V5_V_FULL_SCALE/(2 ^ ADC_BITS) * ADC_V5_SCALE)
  */
@@ -145,7 +149,10 @@
 #  define BOARD_BATT_I_LIST       {ADC_BATTERY_CURRENT_CHANNEL}
 #  define BOARD_BRICK_VALID_LIST  {BOARD_ADC_BRICK_VALID}
 #elif BOARD_NUMBER_BRICKS == 2
-#  if  !defined(BOARD_NUMBER_DIGITAL_BRICKS)
+#  if  defined(BOARD_NUMBER_DIGITAL_BRICKS)
+#    define BOARD_BATT_V_LIST       {-1, -1}
+#    define BOARD_BATT_I_LIST       {-1, -1}
+#  else
 #    define BOARD_BATT_V_LIST       {ADC_BATTERY1_VOLTAGE_CHANNEL, ADC_BATTERY2_VOLTAGE_CHANNEL}
 #    define BOARD_BATT_I_LIST       {ADC_BATTERY1_CURRENT_CHANNEL, ADC_BATTERY2_CURRENT_CHANNEL}
 #  endif
@@ -174,7 +181,19 @@
 /* Define the source for ADC_SCALED_V3V3_SENSORS_SENSE */
 
 #if defined(ADC_SCALED_VDD_3V3_SENSORS_CHANNEL)
-#  define ADC_SCALED_V3V3_SENSORS_SENSE ADC_SCALED_VDD_3V3_SENSORS_CHANNEL
+#  define ADC_SCALED_V3V3_SENSORS_SENSE { ADC_SCALED_VDD_3V3_SENSORS_CHANNEL }
+#  define ADC_SCALED_V3V3_SENSORS_COUNT 1
+#elif defined(ADC_SCALED_VDD_3V3_SENSORS4_CHANNEL)
+#  define ADC_SCALED_V3V3_SENSORS_SENSE { ADC_SCALED_VDD_3V3_SENSORS1_CHANNEL, ADC_SCALED_VDD_3V3_SENSORS2_CHANNEL, \
+		ADC_SCALED_VDD_3V3_SENSORS3_CHANNEL, ADC_SCALED_VDD_3V3_SENSORS4_CHANNEL }
+#  define ADC_SCALED_V3V3_SENSORS_COUNT 4
+#elif defined(ADC_SCALED_VDD_3V3_SENSORS3_CHANNEL)
+#  define ADC_SCALED_V3V3_SENSORS_SENSE { ADC_SCALED_VDD_3V3_SENSORS1_CHANNEL, ADC_SCALED_VDD_3V3_SENSORS2_CHANNEL, \
+		ADC_SCALED_VDD_3V3_SENSORS3_CHANNEL }
+#  define ADC_SCALED_V3V3_SENSORS_COUNT 3
+#elif defined(ADC_SCALED_VDD_3V3_SENSORS2_CHANNEL)
+#  define ADC_SCALED_V3V3_SENSORS_SENSE { ADC_SCALED_VDD_3V3_SENSORS1_CHANNEL, ADC_SCALED_VDD_3V3_SENSORS2_CHANNEL }
+#  define ADC_SCALED_V3V3_SENSORS_COUNT 2
 #endif
 
 /* Define an overridable default of 0.0f V for batery v div
@@ -229,13 +248,6 @@
 #endif
 
 /*
- * Defined when a board has capture and uses channels.
- */
-#if defined(DIRECT_INPUT_TIMER_CHANNELS) && DIRECT_INPUT_TIMER_CHANNELS > 0
-#define BOARD_HAS_CAPTURE 1
-#endif
-
-/*
  * Defined when a supports version and type API.
  */
 #if defined(BOARD_HAS_SIMPLE_HW_VERSIONING)
@@ -250,7 +262,11 @@
 
 #if defined(BOARD_HAS_HW_VERSIONING)
 #  define BOARD_HAS_VERSIONING 1
+#  define HW_VER_REV(v,r)       ((uint32_t)((v) & 0xffff) << 16) | ((uint32_t)(r) & 0xffff)
 #endif
+
+#define HW_INFO_REV_DIGITS    3
+#define HW_INFO_VER_DIGITS    3
 
 /* Default LED logical to color mapping */
 
@@ -324,15 +340,18 @@ typedef enum PX4_SOC_ARCH_ID_t {
 	PX4_SOC_ARCH_ID_STM32H7        =  0x0006,
 
 	PX4_SOC_ARCH_ID_NXPS32K146     =  0x0007,
+	PX4_SOC_ARCH_ID_NXPS32K344     =  0x0008,
 
 	PX4_SOC_ARCH_ID_EAGLE          =  0x1001,
 	PX4_SOC_ARCH_ID_QURT           =  0x1002,
-	PX4_SOC_ARCH_ID_OCPOC          =  0x1003,
+
 	PX4_SOC_ARCH_ID_RPI            =  0x1004,
 	PX4_SOC_ARCH_ID_SIM            =  0x1005,
 	PX4_SOC_ARCH_ID_SITL           =  0x1006,
-	PX4_SOC_ARCH_ID_BEBOP          =  0x1007,
+
 	PX4_SOC_ARCH_ID_BBBLUE         =  0x1008,
+
+	PX4_SOC_ARCH_ID_VOXL2          =  0x100A,
 
 } PX4_SOC_ARCH_ID_t;
 
@@ -421,6 +440,8 @@ __BEGIN_DECLS
 
 #if defined(RC_SERIAL_SINGLEWIRE)
 static inline bool board_rc_singlewire(const char *device) { return strcmp(device, RC_SERIAL_PORT) == 0; }
+#elif defined(RC_SERIAL_SINGLEWIRE_FORCE)
+static inline bool board_rc_singlewire(const char *device) { return true; }
 #else
 static inline bool board_rc_singlewire(const char *device) { return false; }
 #endif
@@ -493,11 +514,7 @@ static inline bool board_rc_invert_input(const char *device, bool invert) { retu
  *
  ************************************************************************************/
 
-#if defined(GPIO_OTGFS_VBUS)
-#  define board_read_VBUS_state() (px4_arch_gpioread(GPIO_OTGFS_VBUS) ? 0 : 1)
-#else
 int board_read_VBUS_state(void);
-#endif
 
 /************************************************************************************
  * Name: board_on_reset
@@ -547,9 +564,9 @@ __EXPORT void board_on_reset(int status);
  *
  ****************************************************************************/
 
-#ifdef CONFIG_BOARDCTL_POWEROFF
+#if defined(BOARD_HAS_POWER_CONTROL)
 int board_power_off(int status);
-#endif
+#endif // BOARD_HAS_POWER_CONTROL
 
 /****************************************************************************
  * Name: board_reset
@@ -575,6 +592,52 @@ int board_power_off(int status);
 int board_reset(int status);
 #endif
 
+/****************************************************************************
+ * Name: board_configure_reset
+ *
+ * Description:
+ *   Configures the device that maintains the state shared by the
+ *   application and boot loader. This is usually an RTC.
+ *
+ * Input Parameters:
+ *   mode  - The type of reset. See reset_mode_e
+ *
+ * Returned Value:
+ *   0 for Success
+ *   1 if invalid argument
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_BOARDCTL_RESET
+
+typedef enum  reset_mode_e {
+	BOARD_RESET_MODE_CLEAR             = 0, /* Clear the mode */
+	BOARD_RESET_MODE_BOOT_TO_BL        = 1, /* Reboot and stay in the bootloader */
+	BOARD_RESET_MODE_BOOT_TO_VALID_APP = 2, /* Reboot to a valid app or stay in bootloader */
+	BOARD_RESET_MODE_CAN_BL            = 3, /* Used to pass a node ID and stay in the can bootloader */
+	BOARD_RESET_MODE_RTC_BOOT_FWOK     = 4  /* Set by a a watch dogged application after running > 30 Seconds */
+} reset_mode_e;
+
+int board_configure_reset(reset_mode_e mode, uint32_t arg);
+#endif
+
+#if defined(SUPPORT_ALT_CAN_BOOTLOADER)
+/****************************************************************************
+ * Name: board_booted_by_px4
+ *
+ * Description:
+ *   Determines if the the boot loader was PX4
+ *
+ * Input Parameters:
+ *   none
+ *
+ * Returned Value:
+ *   true if booted byt a PX4 bootloader.
+ *
+ ****************************************************************************/
+
+bool board_booted_by_px4(void);
+#endif
 /************************************************************************************
  * Name: board_query_manifest
  *
@@ -785,7 +848,7 @@ __EXPORT void board_get_uuid32(uuid_uint32_t uuid_words); // DEPRICATED use boar
  *
  * Input Parameters:
  *   format_buffer - A pointer to a bufferer of at least PX4_CPU_UUID_WORD32_FORMAT_SIZE
- *                   that will contain a 0 terminated string formated as described
+ *                   that will contain a 0 terminated string formatted as described
  *                   the format string and optional separator.
  *   size          - The size of the buffer (should be atleaset PX4_CPU_UUID_WORD32_FORMAT_SIZE)
  *   format        - The fort mat specifier for the hex digit see CPU_UUID_FORMAT
@@ -801,7 +864,7 @@ __EXPORT void board_get_uuid32(uuid_uint32_t uuid_words); // DEPRICATED use boar
  *                               3238333641203833355110
  *
  * Returned Value:
- *   The format buffer is populated with a 0 terminated string formated as described.
+ *   The format buffer is populated with a 0 terminated string formatted as described.
  *   Zero (OK) is returned on success;
  *
  ************************************************************************************/
@@ -838,7 +901,7 @@ int board_get_mfguid(mfguid_t mfgid);
  *
  * Input Parameters:
  *   format_buffer - A pointer to a bufferer of at least PX4_CPU_MFGUID_FORMAT_SIZE
- *                   that will contain a 0 terminated string formated as 0 prefixed
+ *                   that will contain a 0 terminated string formatted as 0 prefixed
  *                   lowercase hex. 2 charaters per digit of the mfguid_t.
  *
  * Returned Value:
@@ -888,14 +951,14 @@ int board_get_mfguid_formated(char *format_buffer, int size); // DEPRICATED use 
 int board_get_px4_guid(px4_guid_t guid);
 
 /************************************************************************************
- * Name: board_get_mfguid_formated
+ * Name: board_get_px4_guid_formated
  *
  * Description:
  *   All boards either provide a way to retrieve a formatted string of the
  *   manufactures Unique ID or define BOARD_OVERRIDE_PX4_GUID
  *
  * Input Parameters:
- * format_buffer - A buffer to receive the 0 terminated formated px4
+ * format_buffer - A buffer to receive the 0 terminated formatted px4
  *                 guid string.
  * size          - Size of the buffer provided. Normally this would
  *                 be PX4_GUID_FORMAT_SIZE.
@@ -963,8 +1026,12 @@ int board_register_power_state_notification_cb(power_button_state_notification_t
 
 enum board_bus_types {
 	BOARD_INVALID_BUS = 0,
+#if defined(CONFIG_SPI)
 	BOARD_SPI_BUS = 1,
+#endif // CONFIG_SPI
+#if defined(CONFIG_I2C)
 	BOARD_I2C_BUS = 2
+#endif // CONFIG_I2C
 };
 
 #if defined(BOARD_HAS_BUS_MANIFEST)
