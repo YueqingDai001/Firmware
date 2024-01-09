@@ -237,6 +237,24 @@ public:
 	*/
 	float getOpenLoopFrontTransitionTime() const;
 
+	/**
+	 *
+	 * @return The minimum calibrated airspeed compensated for weight [m/s]
+	 */
+	float getMinimumTransitionAirspeed() const;
+
+	/**
+	 *
+	 * @return The calibrated blending airspeed [m/s]
+	 */
+	float getBlendAirspeed() const;
+
+	/**
+	 *
+	 * @return The calibrated transition airspeed [m/s]
+	 */
+	float getTransitionAirspeed() const;
+
 	virtual void parameters_update() = 0;
 
 	/**
@@ -251,6 +269,12 @@ public:
 	 *
 	 */
 	void resetTransitionStates();
+
+	/**
+	 * @brief Handle EKF position resets.
+	 *
+	 */
+	void handleEkfResets();
 
 protected:
 	VtolAttitudeControl *_attc;
@@ -312,6 +336,8 @@ protected:
 
 	float _local_position_z_start_of_transition{0.f}; // altitude at start of transition
 
+	int _altitude_reset_counter{0};
+
 	DEFINE_PARAMETERS_CUSTOM_PARENT(ModuleParams,
 					(ParamBool<px4::params::VT_ELEV_MC_LOCK>) _param_vt_elev_mc_lock,
 					(ParamFloat<px4::params::VT_FW_MIN_ALT>) _param_vt_fw_min_alt,
@@ -328,7 +354,7 @@ protected:
 					(ParamFloat<px4::params::VT_ARSP_TRANS>) _param_vt_arsp_trans,
 					(ParamFloat<px4::params::VT_F_TRANS_THR>) _param_vt_f_trans_thr,
 					(ParamFloat<px4::params::VT_ARSP_BLEND>) _param_vt_arsp_blend,
-					(ParamBool<px4::params::FW_ARSP_MODE>) _param_fw_arsp_mode,
+					(ParamBool<px4::params::FW_USE_AIRSPD>) _param_fw_use_airspd,
 					(ParamFloat<px4::params::VT_TRANS_TIMEOUT>) _param_vt_trans_timeout,
 					(ParamFloat<px4::params::MPC_XY_CRUISE>) _param_mpc_xy_cruise,
 					(ParamInt<px4::params::VT_FW_DIFTHR_EN>) _param_vt_fw_difthr_en,
@@ -343,7 +369,11 @@ protected:
 					(ParamInt<px4::params::VT_FWD_THRUST_EN>) _param_vt_fwd_thrust_en,
 					(ParamFloat<px4::params::MPC_LAND_ALT1>) _param_mpc_land_alt1,
 					(ParamFloat<px4::params::MPC_LAND_ALT2>) _param_mpc_land_alt2,
-					(ParamFloat<px4::params::VT_LND_PITCH_MIN>) _param_vt_lnd_pitch_min
+					(ParamFloat<px4::params::VT_LND_PITCH_MIN>) _param_vt_lnd_pitch_min,
+					(ParamFloat<px4::params::WEIGHT_BASE>) _param_weight_base,
+					(ParamFloat<px4::params::WEIGHT_GROSS>) _param_weight_gross,
+					(ParamFloat<px4::params::FW_AIRSPD_MIN>) _param_airspeed_min
+
 				       )
 
 private:
