@@ -75,6 +75,7 @@ public:
 		if (uORB::SubscriptionCallbackWorkItem::update(&dist)) {
 			uavcan::equipment::range_sensor::Measurement range_sensor{};
 
+			range_sensor.timestamp.usec = getNode().getUtcTime().toUSec() - (hrt_absolute_time() - dist.timestamp);
 			range_sensor.sensor_id = get_instance();
 			range_sensor.range = dist.current_distance;
 			range_sensor.field_of_view = dist.h_fov;
@@ -100,10 +101,12 @@ public:
 			}
 
 			// reading_type
-			if (dist.current_distance >= dist.max_distance) {
+			const float tolerance = 1e-6;
+
+			if (dist.current_distance > dist.max_distance) {
 				range_sensor.reading_type = uavcan::equipment::range_sensor::Measurement::READING_TYPE_TOO_FAR;
 
-			} else if (dist.current_distance <= dist.min_distance) {
+			} else if (dist.current_distance < dist.min_distance - tolerance) {
 				range_sensor.reading_type = uavcan::equipment::range_sensor::Measurement::READING_TYPE_TOO_CLOSE;
 
 			} else if (dist.signal_quality != 0) {

@@ -107,7 +107,7 @@ __EXPORT void board_peripheral_reset(int ms)
 
 	VDD_5V_PERIPH_EN(false);
 	board_control_spi_sensors_power(false, 0xffff);
-	VDD_3V3_SENSORS4_EN(false);
+	VDD_3V3_SENSORS_EN(false);
 
 	bool last = READ_VDD_3V3_SPEKTRUM_POWER_EN();
 	/* Keep Spektum on to discharge rail*/
@@ -122,7 +122,7 @@ __EXPORT void board_peripheral_reset(int ms)
 	/* switch the peripheral rail back on */
 	VDD_3V3_SPEKTRUM_POWER_EN(last);
 	board_control_spi_sensors_power(true, 0xffff);
-	VDD_3V3_SENSORS4_EN(true);
+	VDD_3V3_SENSORS_EN(true);
 	VDD_5V_PERIPH_EN(true);
 
 }
@@ -144,8 +144,13 @@ __EXPORT void board_on_reset(int status)
 		px4_arch_configgpio(io_timer_channel_get_gpio_output(i));
 	}
 
+	/*
+	 * On resets invoked from system (not boot) ensure we establish a low
+	 * output state on PWM pins to disarm the ESC and prevent the reset from potentially
+	 * spinning up the motors.
+	 */
 	if (status >= 0) {
-		up_mdelay(6);
+		up_mdelay(100);
 	}
 }
 
@@ -214,7 +219,7 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	VDD_3V3_SD_CARD_EN(true);
 	VDD_5V_PERIPH_EN(true);
 	VDD_5V_HIPOWER_EN(true);
-	VDD_3V3_SENSORS4_EN(true);
+	VDD_3V3_SENSORS_EN(true);
 	VDD_3V3_SPEKTRUM_POWER_EN(true);
 
 	/* Need hrt running before using the ADC */

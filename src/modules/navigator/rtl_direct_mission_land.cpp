@@ -40,6 +40,7 @@
  */
 
 #include "rtl_direct_mission_land.h"
+#include "mission_item_utils.h"
 #include "navigator.h"
 
 #include <drivers/drv_hrt.h>
@@ -96,7 +97,7 @@ void RtlDirectMissionLand::on_activation()
 	_needs_climbing = false;
 
 	if (hasMissionLandStart()) {
-		_is_current_planned_mission_item_valid = (goToItem(_mission.land_start_index, false) == PX4_OK);
+		_is_current_planned_mission_item_valid = (goToItem(_mission.land_start_index, MissionTraversalType::IgnoreDoJump) == PX4_OK);
 
 		_needs_climbing = checkNeedsToClimb();
 
@@ -115,13 +116,14 @@ void RtlDirectMissionLand::on_activation()
 
 bool RtlDirectMissionLand::setNextMissionItem()
 {
-	return (goToNextPositionItem(true) == PX4_OK);
+	return (goToNextPositionItem() == PX4_OK);
 }
 
 void RtlDirectMissionLand::setActiveMissionItems()
 {
 	WorkItemType new_work_item_type{WorkItemType::WORK_ITEM_TYPE_DEFAULT};
 	position_setpoint_triplet_s *pos_sp_triplet = _navigator->get_position_setpoint_triplet();
+	const position_setpoint_s current_setpoint_copy = pos_sp_triplet->current;
 
 	// Climb to altitude
 	if (_needs_climbing && _work_item_type == WorkItemType::WORK_ITEM_TYPE_DEFAULT) {
@@ -142,7 +144,7 @@ void RtlDirectMissionLand::setActiveMissionItems()
 		_mission_item.time_inside = 0.0f;
 		_mission_item.autocontinue = true;
 		_mission_item.origin = ORIGIN_ONBOARD;
-		_mission_item.loiter_radius = _navigator->get_loiter_radius();
+		_mission_item.loiter_radius = _navigator->get_default_loiter_rad();
 
 		mavlink_log_info(_navigator->get_mavlink_log_pub(), "RTL Mission land: climb to %d m\t",
 				 (int)ceilf(_rtl_alt));
@@ -167,7 +169,7 @@ void RtlDirectMissionLand::setActiveMissionItems()
 
 		new_work_item_type = WorkItemType::WORK_ITEM_TYPE_TRANSITION_AFTER_TAKEOFF;
 
-	} else if (item_contains_position(_mission_item)) {
+	} else if (mission_item_contains_position(_mission_item)) {
 
 		static constexpr size_t max_num_next_items{1u};
 		int32_t next_mission_items_index[max_num_next_items];
@@ -203,8 +205,6 @@ void RtlDirectMissionLand::setActiveMissionItems()
 
 			_mission_item.autocontinue = true;
 			_mission_item.time_inside = 0.0f;
-
-			pos_sp_triplet->previous = pos_sp_triplet->current;
 		}
 
 		if (num_found_items > 0) {
@@ -212,6 +212,12 @@ void RtlDirectMissionLand::setActiveMissionItems()
 		}
 
 		mission_item_to_position_setpoint(_mission_item, &pos_sp_triplet->current);
+
+		// Only set the previous position item if the current one really changed
+		if ((_work_item_type != WorkItemType::WORK_ITEM_TYPE_MOVE_TO_LAND) &&
+		    !position_setpoint_equal(&pos_sp_triplet->current, &current_setpoint_copy)) {
+			pos_sp_triplet->previous = current_setpoint_copy;
+		}
 
 		// prevent lateral guidance from loitering at a waypoint as part of a mission landing if the altitude
 		// is not achieved.

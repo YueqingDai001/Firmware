@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #############################################################################
 #
-#   Copyright (C) 2013-2022 PX4 Pro Development Team. All rights reserved.
+#   Copyright (C) 2013-2022 PX4 Development Team. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -173,7 +173,7 @@ def generate_output_from_file(format_idx, filename, outputdir, package, template
 
 def generate_by_template(output_file, template_file, em_globals):
     """
-    Invokes empy intepreter to geneate output_file by the
+    Invokes empy intepreter to generate output_file by the
     given template_file and predefined em_globals dict
     """
     # check if folder exists:

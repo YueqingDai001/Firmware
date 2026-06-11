@@ -51,6 +51,8 @@ bool GZMixingInterfaceWheel::init(const std::string &model_name)
 		return false;
 	}
 
+	pthread_mutex_init(&_node_mutex, nullptr);
+
 	_wheel_encoders_pub.advertise();
 
 	ScheduleNow();
@@ -58,7 +60,8 @@ bool GZMixingInterfaceWheel::init(const std::string &model_name)
 	return true;
 }
 
-bool GZMixingInterfaceWheel::updateOutputs(bool stop_wheels, uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+bool GZMixingInterfaceWheel::updateOutputs(float outputs[MAX_ACTUATORS],
+		unsigned num_outputs,
 		unsigned num_control_groups_updated)
 {
 	unsigned active_output_count = 0;
@@ -74,15 +77,18 @@ bool GZMixingInterfaceWheel::updateOutputs(bool stop_wheels, uint16_t outputs[MA
 
 	if (active_output_count > 0) {
 		gz::msgs::Actuators wheel_velocity_message;
-		wheel_velocity_message.mutable_velocity()->Resize(active_output_count, 0);
+
+		auto *vel = wheel_velocity_message.mutable_velocity();
+		vel->Clear();
+		vel->Reserve(active_output_count);
+
+		// Offsetting the output allows for negative values despite unsigned integer to reverse the wheels
+		static constexpr double output_offset = 100.0;
 
 		for (unsigned i = 0; i < active_output_count; i++) {
-			// Offsetting the output allows for negative values despite unsigned integer to reverse the wheels
-			static constexpr double output_offset = 100.0;
-			double scaled_output = (double)outputs[i] - output_offset;
-			wheel_velocity_message.set_velocity(i, scaled_output);
+			double scaled_output = static_cast<double>(outputs[i]) - output_offset;
+			vel->Add(scaled_output);
 		}
-
 
 		if (_actuators_pub.Valid()) {
 			return _actuators_pub.Publish(wheel_velocity_message);

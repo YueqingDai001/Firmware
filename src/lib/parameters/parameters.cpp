@@ -305,11 +305,11 @@ param_get(param_t param, void *val)
 
 		switch (param_type(param)) {
 		case PARAM_TYPE_INT32:
-			*(int32_t *)val = retrieve_value.i;
+			memcpy(val, &retrieve_value.i, sizeof(retrieve_value.i));
 			return PX4_OK;
 
 		case PARAM_TYPE_FLOAT:
-			*(float *)val = retrieve_value.f;
+			memcpy(val, &retrieve_value.f, sizeof(retrieve_value.f));
 			return PX4_OK;
 		}
 	}
@@ -327,13 +327,17 @@ param_get_default_value_internal(param_t param, void *default_val)
 
 	if (default_val) {
 		switch (param_type(param)) {
-		case PARAM_TYPE_INT32:
-			*(int32_t *) default_val = runtime_defaults.get(param).i;
-			return PX4_OK;
+		case PARAM_TYPE_INT32: {
+				int32_t val = runtime_defaults.get(param).i;
+				memcpy(default_val, &val, sizeof(val));
+				return PX4_OK;
+			}
 
-		case PARAM_TYPE_FLOAT:
-			*(float *) default_val = runtime_defaults.get(param).f;
-			return PX4_OK;
+		case PARAM_TYPE_FLOAT: {
+				float val = runtime_defaults.get(param).f;
+				memcpy(default_val, &val, sizeof(val));
+				return PX4_OK;
+			}
 		}
 	}
 
@@ -409,6 +413,11 @@ param_set_internal(param_t param, const void *val, bool mark_saved, bool notify_
 		return PX4_ERROR;
 	}
 
+	if (param_is_readonly(param)) {
+		PX4_WARN("param %s is read-only", param_name(param));
+		return PX4_ERROR;
+	}
+
 	int result = -1;
 	bool param_changed = false;
 	perf_begin(param_set_perf);
@@ -418,13 +427,13 @@ param_set_internal(param_t param, const void *val, bool mark_saved, bool notify_
 
 	switch (param_type(param)) {
 	case PARAM_TYPE_INT32:
-		param_changed = user_config_value.i != *(int32_t *)val;
-		new_value.i = *(int32_t *)val;
+		memcpy(&new_value.i, val, sizeof(new_value.i));
+		param_changed = user_config_value.i != new_value.i;
 		break;
 
 	case PARAM_TYPE_FLOAT:
-		param_changed = fabsf(user_config_value.f - * (float *) val) > FLT_EPSILON;
-		new_value.f = *(float *) val;
+		memcpy(&new_value.f, val, sizeof(new_value.f));
+		param_changed = fabsf(user_config_value.f - new_value.f) > FLT_EPSILON;
 		break;
 
 	default: {
@@ -434,7 +443,7 @@ param_set_internal(param_t param, const void *val, bool mark_saved, bool notify_
 	}
 
 	if (user_config.store(param, new_value)) {
-		params_unsaved.set(param, !mark_saved);
+		params_unsaved.set(param, !mark_saved && param_changed);
 		result = PX4_OK;
 
 	} else {
@@ -540,6 +549,11 @@ int param_set_default_value(param_t param, const void *val)
 		return PX4_ERROR;
 	}
 
+	if (param_is_readonly(param)) {
+		PX4_WARN("param %s is read-only", param_name(param));
+		return PX4_ERROR;
+	}
+
 	int result = PX4_ERROR;
 
 
@@ -548,13 +562,19 @@ int param_set_default_value(param_t param, const void *val)
 	const param_value_u firmware_default_value = firmware_defaults.get(param);
 
 	switch (param_type(param)) {
-	case PARAM_TYPE_INT32:
-		setting_to_static_default = (firmware_default_value.i == *(int32_t *)val);
-		break;
+	case PARAM_TYPE_INT32: {
+			int32_t new_value;
+			memcpy(&new_value, val, sizeof(new_value));
+			setting_to_static_default = firmware_default_value.i == new_value;
+			break;
+		}
 
-	case PARAM_TYPE_FLOAT:
-		setting_to_static_default = (fabsf(firmware_default_value.f - * (float *)val) <= FLT_EPSILON);
-		break;
+	case PARAM_TYPE_FLOAT: {
+			float new_value;
+			memcpy(&new_value, val, sizeof(new_value));
+			setting_to_static_default = fabsf(firmware_default_value.f - new_value) <= FLT_EPSILON;
+			break;
+		}
 	}
 
 	if (setting_to_static_default) {
@@ -567,12 +587,12 @@ int param_set_default_value(param_t param, const void *val)
 
 		switch (param_type(param)) {
 		case PARAM_TYPE_INT32: {
-				new_value.i = *(int32_t *) val;
+				memcpy(&new_value.i, val, sizeof(new_value.i));
 				break;
 			}
 
 		case PARAM_TYPE_FLOAT: {
-				new_value.f = *(float *) val;
+				memcpy(&new_value.f, val, sizeof(new_value.f));
 				break;
 			}
 
@@ -604,6 +624,10 @@ static int param_reset_internal(param_t param, bool notify = true, bool autosave
 	// Remote doesn't support reset
 	return false;
 #endif
+
+	if (param_is_readonly(param)) {
+		return 0;  // silently skip — param_reset_all loops over all params
+	}
 
 	bool param_found = user_config.contains(param);
 

@@ -103,7 +103,7 @@ protected:
 	 */
 	virtual int	probe() { return PX4_OK; }
 
-	virtual void set_device_address(int address);
+	virtual void set_device_address(int address, bool log = true);
 
 	/**
 	 * Perform an I2C transaction to the device.
@@ -124,10 +124,18 @@ protected:
 private:
 	uint32_t		               _frequency{0};
 	int                            _i2c_fd{-1};
+	pthread_mutex_t               *_mutex{nullptr};
+
+	static const int MAX_I2C_BUS{4};
+
 	static _config_i2c_bus_func_t  _config_i2c_bus;
 	static _set_i2c_address_func_t _set_i2c_address;
 	static _i2c_transfer_func_t    _i2c_transfer;
-	static pthread_mutex_t         _mutex;
+
+	static struct _bus_mutex_t {
+		int _bus;
+		pthread_mutex_t _mutex{PTHREAD_MUTEX_INITIALIZER};
+	} _bus_mutex[MAX_I2C_BUS];
 };
 
 } // namespace device

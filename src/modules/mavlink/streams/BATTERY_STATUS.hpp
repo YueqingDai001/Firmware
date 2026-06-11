@@ -72,40 +72,43 @@ private:
 				bat_msg.id = battery_status.id - 1;
 				bat_msg.battery_function = MAV_BATTERY_FUNCTION_ALL;
 				bat_msg.type = MAV_BATTERY_TYPE_LIPO;
-				bat_msg.current_consumed = (battery_status.connected) ? battery_status.discharged_mah : -1;
+				bat_msg.current_consumed = (battery_status.connected
+							    && fabsf(battery_status.discharged_mah + 1.f) > FLT_EPSILON) ? battery_status.discharged_mah : -1;
 				bat_msg.energy_consumed = -1;
-				bat_msg.current_battery = (battery_status.connected) ? battery_status.current_a * 100 : -1;
-				bat_msg.battery_remaining = (battery_status.connected) ? roundf(battery_status.remaining * 100.f) : -1;
+				bat_msg.current_battery = (battery_status.connected
+							   && fabsf(battery_status.current_a + 1.f) > FLT_EPSILON) ? battery_status.current_a * 100 : -1;
+				bat_msg.battery_remaining = (battery_status.connected
+							     && fabsf(battery_status.remaining + 1.f) > FLT_EPSILON) ? roundf(battery_status.remaining * 100.f) : -1;
 				// MAVLink extension: 0 is unsupported, in uORB it's NAN
 				bat_msg.time_remaining = (battery_status.connected && (PX4_ISFINITE(battery_status.time_remaining_s))) ?
 							 math::max((int)battery_status.time_remaining_s, 1) : 0;
 
 				switch (battery_status.warning) {
-				case (battery_status_s::BATTERY_WARNING_NONE):
+				case (battery_status_s::WARNING_NONE):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_OK;
 					break;
 
-				case (battery_status_s::BATTERY_WARNING_LOW):
+				case (battery_status_s::WARNING_LOW):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_LOW;
 					break;
 
-				case (battery_status_s::BATTERY_WARNING_CRITICAL):
+				case (battery_status_s::WARNING_CRITICAL):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_CRITICAL;
 					break;
 
-				case (battery_status_s::BATTERY_WARNING_EMERGENCY):
+				case (battery_status_s::WARNING_EMERGENCY):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_EMERGENCY;
 					break;
 
-				case (battery_status_s::BATTERY_WARNING_FAILED):
+				case (battery_status_s::WARNING_FAILED):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_FAILED;
 					break;
 
-				case (battery_status_s::BATTERY_STATE_UNHEALTHY):
+				case (battery_status_s::STATE_UNHEALTHY):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_UNHEALTHY;
 					break;
 
-				case (battery_status_s::BATTERY_STATE_CHARGING):
+				case (battery_status_s::STATE_CHARGING):
 					bat_msg.charge_state = MAV_BATTERY_CHARGE_STATE_CHARGING;
 					break;
 

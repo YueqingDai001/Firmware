@@ -48,6 +48,7 @@ px4_add_library(mixer_module
 	functions/FunctionConstantMax.hpp
 	functions/FunctionConstantMin.hpp
 	functions/FunctionGimbal.hpp
+	functions/FunctionICEngineControl.hpp
 	functions/FunctionLandingGear.hpp
 	functions/FunctionManualRC.hpp
 	functions/FunctionMotors.hpp
@@ -59,6 +60,8 @@ px4_add_library(mixer_module
 	mixer_module.cpp
 	mixer_module.hpp
 	)
+set_property(GLOBAL APPEND PROPERTY PX4_MODULE_CONFIG_FILES ${CMAKE_CURRENT_SOURCE_DIR}/motor_params.yaml)
+set_property(GLOBAL APPEND PROPERTY PX4_MODULE_CONFIG_FILES ${CMAKE_CURRENT_SOURCE_DIR}/params.yaml)
 
 add_dependencies(mixer_module output_functions_header)
 target_compile_options(mixer_module PRIVATE ${MAX_CUSTOM_OPT_LEVEL})

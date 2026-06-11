@@ -35,7 +35,7 @@ if(EXISTS ${BOARD_DEFCONFIG})
 	# Depend on BOARD_DEFCONFIG so that we reconfigure on config change
 	set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${BOARD_DEFCONFIG})
 
-	if(${LABEL} MATCHES "default" OR ${LABEL} MATCHES "recovery" OR ${LABEL} MATCHES "bootloader" OR ${LABEL} MATCHES "canbootloader")
+	if(${LABEL} MATCHES "default" OR ${LABEL} MATCHES "performance-test" OR ${LABEL} MATCHES "bootloader" OR ${LABEL} MATCHES "canbootloader")
 		# Generate boardconfig from saved defconfig
 		execute_process(
 			COMMAND ${CMAKE_COMMAND} -E env ${COMMON_KCONFIG_ENV_SETTINGS}
@@ -44,6 +44,10 @@ if(EXISTS ${BOARD_DEFCONFIG})
 			OUTPUT_VARIABLE DUMMY_RESULTS
 		)
 	else()
+		# Non-default labels merge default.px4board + {label}.px4board,
+		# so reconfigure must also trigger on changes to default.px4board.
+		set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PX4_BOARD_DIR}/default.px4board)
+
 		# Generate boardconfig from default.px4board and {label}.px4board
 		execute_process(
 			COMMAND ${CMAKE_COMMAND} -E env ${COMMON_KCONFIG_ENV_SETTINGS}
@@ -337,6 +341,11 @@ if(EXISTS ${BOARD_DEFCONFIG})
 		if(UAVCAN_PERIPHERALS)
 			set(config_uavcan_peripheral_firmware ${UAVCAN_PERIPHERALS} CACHE INTERNAL "UAVCAN peripheral firmware" FORCE)
 		endif()
+	endif()
+
+	# ADDITIONAL INIT
+	if(ADDITIONAL_INIT)
+		set(config_additional_init ${ADDITIONAL_INIT} CACHE INTERNAL "additional init" FORCE)
 	endif()
 
 	if(UAVCAN_INTERFACES)

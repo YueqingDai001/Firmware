@@ -33,7 +33,6 @@
 
 set(srcs
 	test_atomic_bitset.cpp
-	test_bezierQuad.cpp
 	test_bitset.cpp
 	test_bson.cpp
 	test_dataman.cpp
@@ -92,6 +91,8 @@ px4_add_module(
 		-O2 # optimization needed to keep matrix code size reasonable
 	SRCS
 		${srcs}
+	MODULE_CONFIG
+		params.yaml
 	DEPENDS
 		dataman_client
 		version

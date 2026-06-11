@@ -41,6 +41,7 @@
 
 #include "mission_base.h"
 
+#include "mission_item_utils.h"
 #include "px4_platform_common/defines.h"
 
 #include "mission_feasibility_checker.h"
@@ -73,8 +74,8 @@ MissionBase::updateDatamanCache()
 {
 	if ((_mission.count > 0) && (_mission.current_seq != _load_mission_index)) {
 
-		const int32_t start_index = math::constrain(_mission.current_seq, INT32_C(0), int32_t(_mission.count) - 1);
-		const int32_t end_index = math::constrain(start_index + _dataman_cache_size_signed, INT32_C(0),
+		const int32_t start_index = math::constrain(_mission.current_seq, int32_t{0}, int32_t(_mission.count) - 1);
+		const int32_t end_index = math::constrain(start_index + _dataman_cache_size_signed, int32_t{0},
 					  int32_t(_mission.count) - 1);
 
 		for (int32_t index = start_index; index != end_index; index += math::signNoZero(_dataman_cache_size_signed)) {
@@ -98,7 +99,7 @@ void MissionBase::updateMavlinkMission()
 		const bool mission_data_changed = checkMissionDataChanged(new_mission);
 
 		if (new_mission.current_seq < 0) {
-			new_mission.current_seq = math::constrain(_mission.current_seq, INT32_C(0),
+			new_mission.current_seq = math::constrain(_mission.current_seq, int32_t{0},
 						  static_cast<int32_t>(new_mission.count) - 1);
 		}
 
@@ -180,8 +181,10 @@ MissionBase::on_inactivation()
 	_navigator->disable_camera_trigger();
 
 	_navigator->stop_capturing_images();
-	_navigator->set_gimbal_neutral(); // point forward
-	_navigator->release_gimbal_control();
+
+	if (!_navigator->get_land_detected()->landed) {
+		_navigator->activate_set_gimbal_neutral_timer(hrt_absolute_time());
+	}
 
 	if (_navigator->get_precland()->is_activated()) {
 		_navigator->get_precland()->on_inactivation();
@@ -218,9 +221,11 @@ MissionBase::on_activation()
 
 	int32_t resume_index = _inactivation_index > 0 ? _inactivation_index : 0;
 
+	bool resume_mission_on_previous = false;
+
 	if (_inactivation_index > 0 && cameraWasTriggering()) {
 		size_t num_found_items{0U};
-		getPreviousPositionItems(_inactivation_index - 1, &resume_index, num_found_items, 1U);
+		getPreviousPositionItems(_inactivation_index, &resume_index, num_found_items, 1U);
 
 		if (num_found_items == 1U) {
 			// The mission we are resuming had camera triggering enabled. In order to not lose any images
@@ -229,7 +234,18 @@ MissionBase::on_activation()
 			setMissionIndex(resume_index);
 
 			_align_heading_necessary = true;
+			resume_mission_on_previous = true;
 		}
+	}
+
+	if (!resume_mission_on_previous) {
+		// Only replay speed changes immediately if we are not resuming the mission at the previous position item.
+		// Otherwise it must be handled in the on_active() method once we reach the previous position item.
+		replayCachedSpeedChangeItems();
+		_speed_replayed_on_activation = true;
+
+	} else {
+		_speed_replayed_on_activation = false;
 	}
 
 	checkClimbRequired(_mission.current_seq);
@@ -275,9 +291,7 @@ MissionBase::on_active()
 
 		if (num_found_items == 1U && !PX4_ISFINITE(_mission_item.yaw)) {
 			mission_item_s next_position_mission_item;
-			const dm_item_t mission_dataman_id = static_cast<dm_item_t>(_mission.mission_dataman_id);
-			bool success = _dataman_cache.loadWait(mission_dataman_id, next_mission_item_index,
-							       reinterpret_cast<uint8_t *>(&next_position_mission_item), sizeof(next_position_mission_item), MAX_DATAMAN_LOAD_WAIT);
+			const bool success = loadMissionItemFromCache(next_mission_item_index, next_position_mission_item);
 
 			if (success) {
 				_mission_item.yaw = matrix::wrap_pi(get_bearing_to_next_waypoint(_mission_item.lat, _mission_item.lon,
@@ -304,14 +318,16 @@ MissionBase::on_active()
 		replayCachedGimbalItems();
 	}
 
-	// Replay cached mission commands once the last mission waypoint is re-reached after the mission interruption.
-	// Each replay function also clears the cached items afterwards
+	// Replay cached trigger commands once the last mission waypoint is re-reached after the mission resume
 	if (_mission.current_seq > _mission_activation_index) {
 		// replay trigger commands
 		if (cameraWasTriggering()) {
 			replayCachedTriggerItems();
 		}
+	}
 
+	if (!_speed_replayed_on_activation && _mission.current_seq > _mission_activation_index) {
+		// replay speed change items if not already done on mission (re-)activation
 		replayCachedSpeedChangeItems();
 	}
 
@@ -369,7 +385,8 @@ MissionBase::on_active()
 bool
 MissionBase::isLanding()
 {
-	if (hasMissionLandStart() && (_mission.current_seq > _mission.land_start_index)) {
+	if (hasMissionLandStart() && (_mission.current_seq > _mission.land_start_index)
+	    && (_mission.current_seq <= _mission.land_index)) {
 		static constexpr size_t max_num_next_items{1u};
 		int32_t next_mission_items_index[max_num_next_items];
 		size_t num_found_items;
@@ -390,7 +407,7 @@ MissionBase::isLanding()
 			// consider mission_item.loiter_radius invalid if NAN or 0, use default value in this case.
 			const float mission_item_loiter_radius_abs = (PX4_ISFINITE(_mission_item.loiter_radius)
 					&& fabsf(_mission_item.loiter_radius) > FLT_EPSILON) ? fabsf(_mission_item.loiter_radius) :
-					_navigator->get_loiter_radius();
+					_navigator->get_default_loiter_rad();
 
 			on_landing_stage = d_current <= (_navigator->get_acceptance_radius() + mission_item_loiter_radius_abs);
 		}
@@ -434,6 +451,11 @@ void MissionBase::update_mission()
 	_navigator->reset_vroi();
 
 	if (_navigator->get_mission_result()->valid) {
+		/* re-issue the climb ticket on cursor change while in takeoff phase */
+		if (_land_detected_sub.get().landed || _work_item_type == WorkItemType::WORK_ITEM_TYPE_CLIMB) {
+			checkClimbRequired(_mission.current_seq);
+		}
+
 		/* reset work item if new mission has been accepted */
 		_work_item_type = WorkItemType::WORK_ITEM_TYPE_DEFAULT;
 
@@ -517,9 +539,7 @@ MissionBase::set_mission_items()
 
 bool MissionBase::loadCurrentMissionItem()
 {
-	const dm_item_t dm_item = static_cast<dm_item_t>(_mission.mission_dataman_id);
-	bool success = _dataman_cache.loadWait(dm_item, _mission.current_seq, reinterpret_cast<uint8_t *>(&_mission_item),
-					       sizeof(mission_item_s), MAX_DATAMAN_LOAD_WAIT);
+	const bool success = loadMissionItemFromCache(_mission.current_seq, _mission_item);
 
 	if (!success) {
 		mavlink_log_critical(_navigator->get_mavlink_log_pub(), "Mission item could not be set.\t");
@@ -538,7 +558,9 @@ void MissionBase::setEndOfMissionItems()
 		_mission_item.nav_cmd = NAV_CMD_IDLE;
 
 	} else {
-		if (pos_sp_triplet->current.valid && pos_sp_triplet->current.type == position_setpoint_s::SETPOINT_TYPE_LOITER) {
+		if (pos_sp_triplet->current.valid &&
+		    (pos_sp_triplet->current.type == position_setpoint_s::SETPOINT_TYPE_LOITER ||
+		     pos_sp_triplet->current.type == position_setpoint_s::SETPOINT_TYPE_POSITION)) {
 			setLoiterItemFromCurrentPositionSetpoint(&_mission_item);
 
 		} else {
@@ -682,10 +704,7 @@ void MissionBase::handleLanding(WorkItemType &new_work_item_type, mission_item_s
 			// if the vehicle drifted off the path during back-transition it should just go straight to the landing point
 			_navigator->reset_position_setpoint(pos_sp_triplet->previous);
 
-			// set gimbal to neutral position (level with horizon) to reduce change of damage on landing
-			_navigator->acquire_gimbal_control();
-			_navigator->set_gimbal_neutral();
-			_navigator->release_gimbal_control();
+			_navigator->activate_set_gimbal_neutral_timer(hrt_absolute_time());
 
 		} else {
 
@@ -860,14 +879,22 @@ MissionBase::do_abort_landing()
 	}
 
 	const float alt_landing = get_absolute_altitude_for_item(_mission_item);
-	const float alt_sp = math::max(alt_landing + _navigator->get_landing_abort_min_alt(),
-				       _global_pos_sub.get().alt);
+
+	// Use the landing item's per-item abort altitude (NAV_CMD_LAND param1) if specified,
+	// otherwise fall back to the global MIS_LND_ABRT_ALT parameter.
+	float abort_min_alt = _navigator->get_landing_abort_min_alt();
+
+	if (PX4_ISFINITE(_mission_item.land_abort_min_alt) && _mission_item.land_abort_min_alt > FLT_EPSILON) {
+		abort_min_alt = _mission_item.land_abort_min_alt;
+	}
+
+	const float alt_sp = math::max(alt_landing + abort_min_alt, _global_pos_sub.get().alt);
 
 	// turn current landing waypoint into an indefinite loiter
 	_mission_item.nav_cmd = NAV_CMD_LOITER_UNLIMITED;
 	_mission_item.altitude_is_relative = false;
 	_mission_item.altitude = alt_sp;
-	_mission_item.loiter_radius = _navigator->get_loiter_radius();
+	_mission_item.loiter_radius = _navigator->get_default_loiter_rad();
 	_mission_item.acceptance_radius = _navigator->get_acceptance_radius();
 	_mission_item.autocontinue = false;
 	_mission_item.origin = ORIGIN_ONBOARD;
@@ -896,20 +923,18 @@ MissionBase::do_abort_landing()
 
 	} else {
 		// move mission index back (landing approach point)
-		_is_current_planned_mission_item_valid = (goToPreviousItem(false) == PX4_OK);
+		_is_current_planned_mission_item_valid = (goToPreviousItem(MissionTraversalType::IgnoreDoJump) == PX4_OK);
 	}
 
 	// send reposition cmd to get out of mission
-	vehicle_command_s vcmd = {};
-
-	vcmd.command = vehicle_command_s::VEHICLE_CMD_DO_REPOSITION;
-	vcmd.param1 = -1;
-	vcmd.param2 = 1;
-	vcmd.param5 = _mission_item.lat;
-	vcmd.param6 = _mission_item.lon;
-	vcmd.param7 = alt_sp;
-
-	_navigator->publish_vehicle_cmd(&vcmd);
+	vehicle_command_s vehicle_command{};
+	vehicle_command.command = vehicle_command_s::VEHICLE_CMD_DO_REPOSITION;
+	vehicle_command.param1 = -1.f; // Default speed
+	vehicle_command.param2 = 1.f; // Modes should switch, not setting this is unsupported
+	vehicle_command.param5 = _mission_item.lat;
+	vehicle_command.param6 = _mission_item.lon;
+	vehicle_command.param7 = alt_sp;
+	_navigator->publish_vehicle_command(vehicle_command);
 }
 
 void MissionBase::publish_navigator_mission_item()
@@ -928,7 +953,7 @@ void MissionBase::publish_navigator_mission_item()
 	navigator_mission_item.yaw = _mission_item.yaw;
 
 	navigator_mission_item.frame = _mission_item.frame;
-	navigator_mission_item.frame = _mission_item.origin;
+	navigator_mission_item.origin = _mission_item.origin;
 
 	navigator_mission_item.loiter_exit_xtrack = _mission_item.loiter_exit_xtrack;
 	navigator_mission_item.force_heading = _mission_item.force_heading;
@@ -956,21 +981,19 @@ bool MissionBase::isMissionValid() const
 	return ret_val;
 }
 
-int MissionBase::getNonJumpItem(int32_t &mission_index, mission_item_s &mission, bool execute_jump,
+int MissionBase::getNonJumpItem(int32_t &mission_index, mission_item_s &mission, MissionTraversalType traversal_type,
 				bool write_jumps, bool mission_direction_backward)
 {
 	if (mission_index >= _mission.count || mission_index < 0) {
 		return PX4_ERROR;
 	}
 
-	const dm_item_t mission_dataman_id = (dm_item_t)_mission.mission_dataman_id;
 	int32_t new_mission_index{mission_index};
 	mission_item_s new_mission;
 
 	for (uint16_t jump_count = 0u; jump_count < MAX_JUMP_ITERATION; jump_count++) {
 		/* read mission item from datamanager */
-		bool success = _dataman_cache.loadWait(mission_dataman_id, new_mission_index, reinterpret_cast<uint8_t *>(&new_mission),
-						       sizeof(mission_item_s), MAX_DATAMAN_LOAD_WAIT);
+		bool success = loadMissionItemFromCache(new_mission_index, new_mission);
 
 		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
@@ -986,8 +1009,10 @@ int MissionBase::getNonJumpItem(int32_t &mission_index, mission_item_s &mission,
 				return PX4_ERROR;
 			}
 
-			if ((new_mission.do_jump_current_count < new_mission.do_jump_repeat_count) && execute_jump) {
+			if ((new_mission.do_jump_current_count < new_mission.do_jump_repeat_count)
+			    && traversal_type == MissionTraversalType::FollowMissionControlFlow) {
 				if (write_jumps) {
+					const dm_item_t mission_dataman_id = static_cast<dm_item_t>(_mission.mission_dataman_id);
 					new_mission.do_jump_current_count++;
 					success = _dataman_cache.writeWait(mission_dataman_id, new_mission_index, reinterpret_cast<uint8_t *>(&new_mission),
 									   sizeof(struct mission_item_s));
@@ -1025,11 +1050,11 @@ int MissionBase::getNonJumpItem(int32_t &mission_index, mission_item_s &mission,
 	return PX4_OK;
 }
 
-int MissionBase::goToItem(int32_t index, bool execute_jump, bool mission_direction_backward)
+int MissionBase::goToItem(int32_t index, MissionTraversalType traversal_type, bool mission_direction_backward)
 {
 	mission_item_s mission_item;
 
-	if (getNonJumpItem(index, mission_item, execute_jump, true, mission_direction_backward) == PX4_OK) {
+	if (getNonJumpItem(index, mission_item, traversal_type, true, mission_direction_backward) == PX4_OK) {
 		setMissionIndex(index);
 		return PX4_OK;
 
@@ -1047,29 +1072,94 @@ void MissionBase::setMissionIndex(int32_t index)
 	}
 }
 
+bool MissionBase::loadMissionItemFromCache(int32_t index, mission_item_s &mission_item)
+{
+	return index >= 0
+	       && index < _mission.count
+	       && _dataman_cache.loadWait(static_cast<dm_item_t>(_mission.mission_dataman_id), index,
+					  reinterpret_cast<uint8_t *>(&mission_item), sizeof(mission_item),
+					  MAX_DATAMAN_LOAD_WAIT);
+}
+
+bool MissionBase::findNextPositionIndex(int32_t start_index, int32_t &next_index,
+					MissionTraversalType traversal_type)
+{
+	for (int32_t mission_index = start_index; mission_index < _mission.count;) {
+		int32_t traversed_index = mission_index;
+		mission_item_s mission_item{};
+
+		if (!loadTraversalItem(traversed_index, mission_item, traversal_type, false)) {
+			return false;
+		}
+
+		if (mission_item_contains_position(mission_item)) {
+			next_index = traversed_index;
+			return true;
+		}
+
+		mission_index = traversed_index + 1;
+	}
+
+	return false;
+}
+
+bool MissionBase::findPreviousPositionIndex(int32_t start_index, int32_t &previous_index,
+		MissionTraversalType traversal_type)
+{
+	for (int32_t mission_index = start_index - 1; mission_index >= 0;) {
+		int32_t traversed_index = mission_index;
+		mission_item_s mission_item{};
+
+		if (!loadTraversalItem(traversed_index, mission_item, traversal_type, true)) {
+			return false;
+		}
+
+		if (mission_item_contains_position(mission_item)) {
+			previous_index = traversed_index;
+			return true;
+		}
+
+		mission_index = traversed_index - 1;
+	}
+
+	return false;
+}
+
+bool MissionBase::loadTraversalItem(int32_t &mission_index, mission_item_s &mission_item,
+				    MissionTraversalType traversal_type, bool direction_backward)
+{
+	if (traversal_type == MissionTraversalType::FollowMissionControlFlow) {
+		return getNonJumpItem(mission_index, mission_item, MissionTraversalType::FollowMissionControlFlow,
+				      false, direction_backward) == PX4_OK;
+	}
+
+	return loadMissionItemFromCache(mission_index, mission_item);
+}
+
 void MissionBase::getPreviousPositionItems(int32_t start_index, int32_t items_index[],
 		size_t &num_found_items, uint8_t max_num_items)
 {
+	getPreviousPositionItems(start_index, items_index, num_found_items, max_num_items, traversalType());
+}
+
+void MissionBase::getPreviousPositionItems(int32_t start_index, int32_t items_index[],
+		size_t &num_found_items, uint8_t max_num_items, MissionTraversalType traversal_type)
+{
 	num_found_items = 0u;
 
-	int32_t next_mission_index{start_index};
+	int32_t search_index{start_index};
 
 	for (size_t item_idx = 0u; item_idx < max_num_items; item_idx++) {
-		if (next_mission_index < 0) {
+		if (search_index < 0) {
 			break;
 		}
 
-		mission_item_s next_mission_item;
-		bool found_next_item{false};
+		int32_t previous_position_index{-1};
 
-		do {
-			next_mission_index--;
-			found_next_item = getNonJumpItem(next_mission_index, next_mission_item, true, false, true) == PX4_OK;
-		} while (!MissionBlock::item_contains_position(next_mission_item) && found_next_item);
-
-		if (found_next_item) {
-			items_index[item_idx] = next_mission_index;
+		if (findPreviousPositionIndex(search_index, previous_position_index, traversal_type)) {
+			items_index[item_idx] = previous_position_index;
 			num_found_items = item_idx + 1;
+			search_index = previous_position_index;
 
 		} else {
 			break;
@@ -1080,28 +1170,29 @@ void MissionBase::getPreviousPositionItems(int32_t start_index, int32_t items_in
 void MissionBase::getNextPositionItems(int32_t start_index, int32_t items_index[],
 				       size_t &num_found_items, uint8_t max_num_items)
 {
+	getNextPositionItems(start_index, items_index, num_found_items, max_num_items, traversalType());
+}
+
+void MissionBase::getNextPositionItems(int32_t start_index, int32_t items_index[],
+				       size_t &num_found_items, uint8_t max_num_items,
+				       MissionTraversalType traversal_type)
+{
 	// Make sure vector does not contain any preexisting elements.
 	num_found_items = 0u;
 
-	int32_t next_mission_index{start_index};
+	int32_t search_index{start_index};
 
 	for (size_t item_idx = 0u; item_idx < max_num_items; item_idx++) {
-		if (next_mission_index >= _mission.count) {
+		if (search_index >= _mission.count) {
 			break;
 		}
 
-		mission_item_s next_mission_item;
-		bool found_next_item{false};
+		int32_t next_position_index{-1};
 
-		do {
-			found_next_item = getNonJumpItem(next_mission_index, next_mission_item, true, false, false) == PX4_OK;
-			next_mission_index++;
-		} while (!MissionBlock::item_contains_position(next_mission_item) && found_next_item);
-
-		if (found_next_item) {
-			items_index[item_idx] = math::max(next_mission_index - 1,
-							  static_cast<int32_t>(0)); // subtract 1 to get the index of the first position item
+		if (findNextPositionIndex(search_index, next_position_index, traversal_type)) {
+			items_index[item_idx] = next_position_index;
 			num_found_items = item_idx + 1;
+			search_index = next_position_index + 1;
 
 		} else {
 			break;
@@ -1109,31 +1200,44 @@ void MissionBase::getNextPositionItems(int32_t start_index, int32_t items_index[
 	}
 }
 
-int MissionBase::goToNextItem(bool execute_jump)
+int MissionBase::goToNextItem()
+{
+	return goToNextItem(traversalType());
+}
+
+int MissionBase::goToNextItem(MissionTraversalType traversal_type)
 {
 	if (_mission.current_seq + 1 >= (_mission.count)) {
 		return PX4_ERROR;
 	}
 
-	return goToItem(_mission.current_seq + 1, execute_jump);
+	return goToItem(_mission.current_seq + 1, traversal_type);
 }
 
-int MissionBase::goToPreviousItem(bool execute_jump)
+int MissionBase::goToPreviousItem()
+{
+	return goToPreviousItem(traversalType());
+}
+
+int MissionBase::goToPreviousItem(MissionTraversalType traversal_type)
 {
 	if (_mission.current_seq <= 0) {
 		return PX4_ERROR;
 	}
 
-	return goToItem(_mission.current_seq - 1, execute_jump, true);
+	return goToItem(_mission.current_seq - 1, traversal_type, true);
 }
 
-int MissionBase::goToPreviousPositionItem(bool execute_jump)
+int MissionBase::goToPreviousPositionItem()
 {
-	size_t num_found_items{0U};
-	int32_t previous_position_item_index;
-	getPreviousPositionItems(_mission.current_seq, &previous_position_item_index, num_found_items, 1);
+	return goToPreviousPositionItem(traversalType());
+}
 
-	if (num_found_items == 1U) {
+int MissionBase::goToPreviousPositionItem(MissionTraversalType traversal_type)
+{
+	int32_t previous_position_item_index{-1};
+
+	if (findPreviousPositionIndex(_mission.current_seq, previous_position_item_index, traversal_type)) {
 		setMissionIndex(previous_position_item_index);
 		return PX4_OK;
 
@@ -1142,13 +1246,16 @@ int MissionBase::goToPreviousPositionItem(bool execute_jump)
 	}
 }
 
-int MissionBase::goToNextPositionItem(bool execute_jump)
+int MissionBase::goToNextPositionItem()
 {
-	size_t num_found_items{0U};
-	int32_t next_position_item_index;
-	getNextPositionItems(_mission.current_seq + 1, &next_position_item_index, num_found_items, 1);
+	return goToNextPositionItem(traversalType());
+}
 
-	if (num_found_items == 1U) {
+int MissionBase::goToNextPositionItem(MissionTraversalType traversal_type)
+{
+	int32_t next_position_item_index{-1};
+
+	if (findNextPositionIndex(_mission.current_seq + 1, next_position_item_index, traversal_type)) {
 		setMissionIndex(next_position_item_index);
 		return PX4_OK;
 
@@ -1162,13 +1269,11 @@ int MissionBase::setMissionToClosestItem(double lat, double lon, float alt, floa
 {
 	int32_t min_dist_index(-1);
 	float min_dist(FLT_MAX), dist_xy(FLT_MAX), dist_z(FLT_MAX);
-	const dm_item_t mission_dataman_id = static_cast<dm_item_t>(_mission.mission_dataman_id);
 
 	for (int32_t mission_item_index = 0; mission_item_index < _mission.count; mission_item_index++) {
 		mission_item_s mission;
 
-		bool success = _dataman_cache.loadWait(mission_dataman_id, mission_item_index, reinterpret_cast<uint8_t *>(&mission),
-						       sizeof(mission_item_s), MAX_DATAMAN_LOAD_WAIT);
+		const bool success = loadMissionItemFromCache(mission_item_index, mission);
 
 		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
@@ -1178,7 +1283,7 @@ int MissionBase::setMissionToClosestItem(double lat, double lon, float alt, floa
 			return PX4_ERROR;
 		}
 
-		if (MissionBlock::item_contains_position(mission)) {
+		if (mission_item_contains_position(mission)) {
 			// do not consider land waypoints for a fw
 			if (!((mission.nav_cmd == NAV_CMD_LAND) &&
 			      (vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING) &&
@@ -1239,8 +1344,7 @@ void MissionBase::resetMissionJumpCounter()
 	for (size_t mission_index = 0u; mission_index < _mission.count; mission_index++) {
 		mission_item_s mission_item;
 
-		bool success = _dataman_client.readSync(mission_dataman_id, mission_index, reinterpret_cast<uint8_t *>(&mission_item),
-							sizeof(mission_item_s), MAX_DATAMAN_LOAD_WAIT);
+		const bool success = loadMissionItemFromCache(mission_index, mission_item);
 
 		if (!success) {
 			/* not supposed to happen unless the datamanager can't access the SD card, etc. */
@@ -1360,7 +1464,7 @@ bool MissionBase::haveCachedCameraModeItems()
 bool MissionBase::cameraWasTriggering()
 {
 	return (_last_camera_trigger_item.nav_cmd == NAV_CMD_DO_TRIGGER_CONTROL
-		&& (int)(_last_camera_trigger_item.params[0] + 0.5f) == 1) ||
+		&& static_cast<int>(lround(_last_camera_trigger_item.params[0])) == 1) ||
 	       (_last_camera_trigger_item.nav_cmd == NAV_CMD_IMAGE_START_CAPTURE) ||
 	       (_last_camera_trigger_item.nav_cmd == NAV_CMD_DO_SET_CAM_TRIGG_DIST
 		&& _last_camera_trigger_item.params[0] > FLT_EPSILON);
@@ -1370,11 +1474,8 @@ void MissionBase::updateCachedItemsUpToIndex(const int end_index)
 {
 	for (int i = 0; i <= end_index; i++) {
 		mission_item_s mission_item;
-		const dm_item_t dm_current = (dm_item_t)_mission.mission_dataman_id;
-		bool success = _dataman_client.readSync(dm_current, i, reinterpret_cast<uint8_t *>(&mission_item),
-							sizeof(mission_item), 500_ms);
 
-		if (success) {
+		if (loadMissionItemFromCache(i, mission_item)) {
 			cacheItem(mission_item);
 		}
 	}
@@ -1400,13 +1501,10 @@ void MissionBase::checkClimbRequired(int32_t mission_item_index)
 
 	if (num_found_items > 0U) {
 
-		const dm_item_t mission_dataman_id = static_cast<dm_item_t>(_mission.mission_dataman_id);
 		mission_item_s mission;
 		_mission_init_climb_altitude_amsl = NAN; // default to NAN, overwrite below if applicable
 
-		const bool success = _dataman_cache.loadWait(mission_dataman_id, next_mission_item_index,
-				     reinterpret_cast<uint8_t *>(&mission),
-				     sizeof(mission), MAX_DATAMAN_LOAD_WAIT);
+		const bool success = loadMissionItemFromCache(next_mission_item_index, mission);
 
 		const bool is_fw_and_takeoff = mission.nav_cmd == NAV_CMD_TAKEOFF
 					       && _vehicle_status_sub.get().vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING;
@@ -1425,7 +1523,7 @@ void MissionBase::checkClimbRequired(int32_t mission_item_index)
 	}
 }
 
-bool MissionBase::checkMissionDataChanged(mission_s new_mission)
+bool MissionBase::checkMissionDataChanged(const mission_s &new_mission)
 {
 	/* count and land_index are the same if the mission_id did not change. We do not care about changes in geofence or rally counters.*/
 	return ((new_mission.mission_dataman_id != _mission.mission_dataman_id) ||
@@ -1445,25 +1543,26 @@ bool MissionBase::canRunMissionFeasibility()
 void MissionBase::updateMissionAltAfterHomeChanged()
 {
 	if (_navigator->get_home_position()->update_count > _home_update_counter) {
-		float new_alt = get_absolute_altitude_for_item(_mission_item);
-		float altitude_diff = new_alt - _navigator->get_position_setpoint_triplet()->current.alt;
 
-		if (_navigator->get_position_setpoint_triplet()->previous.valid
-		    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->previous.alt)) {
-			_navigator->get_position_setpoint_triplet()->previous.alt = _navigator->get_position_setpoint_triplet()->previous.alt +
-					altitude_diff;
+		if (mission_item_contains_position(_mission_item)) {
+			const float new_alt = get_absolute_altitude_for_item(_mission_item);
+			const float altitude_diff = new_alt - _navigator->get_position_setpoint_triplet()->current.alt;
+
+			if (_navigator->get_position_setpoint_triplet()->previous.valid
+			    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->previous.alt)) {
+				_navigator->get_position_setpoint_triplet()->previous.alt += altitude_diff;
+			}
+
+			_navigator->get_position_setpoint_triplet()->current.alt += altitude_diff;
+
+			if (_navigator->get_position_setpoint_triplet()->next.valid
+			    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->next.alt)) {
+				_navigator->get_position_setpoint_triplet()->next.alt += altitude_diff;
+			}
+
+			_navigator->set_position_setpoint_triplet_updated();
 		}
 
-		_navigator->get_position_setpoint_triplet()->current.alt = _navigator->get_position_setpoint_triplet()->current.alt +
-				altitude_diff;
-
-		if (_navigator->get_position_setpoint_triplet()->next.valid
-		    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->next.alt)) {
-			_navigator->get_position_setpoint_triplet()->next.alt = _navigator->get_position_setpoint_triplet()->next.alt +
-					altitude_diff;
-		}
-
-		_navigator->set_position_setpoint_triplet_updated();
 		_home_update_counter = _navigator->get_home_position()->update_count;
 	}
 }

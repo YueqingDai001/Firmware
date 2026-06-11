@@ -42,10 +42,12 @@ set(SRCS)
 
 set(SRCS_COMMON
 	ORBSet.hpp
+	Publication.cpp
 	Publication.hpp
 	PublicationMulti.hpp
 	Subscription.cpp
 	Subscription.hpp
+	SubscriptionCallback.cpp
 	SubscriptionCallback.hpp
 	SubscriptionInterval.cpp
 	SubscriptionInterval.hpp
@@ -112,4 +114,6 @@ if(PX4_TESTING)
 	add_subdirectory(uORB_tests)
 endif()
 
-px4_add_functional_gtest(SRC uORBMessageFieldsTest.cpp LINKLIBS uORB)
+if(PX4_TESTING)
+	add_subdirectory(test)
+endif()

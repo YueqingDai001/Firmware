@@ -43,6 +43,8 @@
 #include <math.h>
 #include <matrix/matrix/math.hpp>
 
+using namespace matrix;
+
 namespace gimbal
 {
 
@@ -180,7 +182,9 @@ InputMavlinkCmdMount::~InputMavlinkCmdMount()
 
 int InputMavlinkCmdMount::initialize()
 {
-	if ((_vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command))) < 0) {
+	_vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command));
+
+	if (_vehicle_command_sub < 0) {
 		return -errno;
 	}
 
@@ -321,9 +325,9 @@ InputMavlinkCmdMount::_process_command(ControlData &control_data, const vehicle_
 		// Stabilization params are ignored. Use MNT_DO_STAB param instead.
 
 		const int params[] = {
-			(int)((float) vehicle_command.param5 + 0.5f),
-			(int)((float) vehicle_command.param6 + 0.5f),
-			(int)(vehicle_command.param7 + 0.5f)
+			static_cast<int>(lroundf(vehicle_command.param5)),
+			static_cast<int>(lroundf(vehicle_command.param6)),
+			static_cast<int>(lroundf(vehicle_command.param7))
 		};
 
 		for (int i = 0; i < 3; ++i) {
@@ -436,11 +440,15 @@ int InputMavlinkGimbalV2::initialize()
 		return -errno;
 	}
 
-	if ((_vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command))) < 0) {
+	_vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command));
+
+	if (_vehicle_command_sub < 0) {
 		return -errno;
 	}
 
-	if ((_gimbal_manager_set_manual_control_sub = orb_subscribe(ORB_ID(gimbal_manager_set_manual_control))) < 0) {
+	_gimbal_manager_set_manual_control_sub = orb_subscribe(ORB_ID(gimbal_manager_set_manual_control));
+
+	if (_gimbal_manager_set_manual_control_sub < 0) {
 		return -errno;
 	}
 
@@ -506,10 +514,12 @@ void InputMavlinkGimbalV2::_stream_gimbal_manager_information(const ControlData 
 			gimbal_manager_information_s::GIMBAL_MANAGER_CAP_FLAGS_HAS_YAW_LOCK |
 			gimbal_manager_information_s::GIMBAL_MANAGER_CAP_FLAGS_CAN_POINT_LOCATION_GLOBAL;
 
-		gimbal_manager_info.pitch_max = _parameters.mnt_range_pitch;
-		gimbal_manager_info.pitch_min = -_parameters.mnt_range_pitch;
-		gimbal_manager_info.yaw_max = _parameters.mnt_range_yaw;
-		gimbal_manager_info.yaw_min = -_parameters.mnt_range_yaw;
+		gimbal_manager_info.pitch_max = math::radians(_parameters.mnt_max_pitch);
+		gimbal_manager_info.pitch_min = math::radians(_parameters.mnt_min_pitch);
+		gimbal_manager_info.yaw_max = math::radians(_parameters.mnt_range_yaw * 0.5f);
+		gimbal_manager_info.yaw_min = math::radians(-_parameters.mnt_range_yaw * 0.5f);
+		gimbal_manager_info.roll_max = math::radians(_parameters.mnt_range_roll * 0.5f);
+		gimbal_manager_info.roll_min = math::radians(-_parameters.mnt_range_roll * 0.5f);
 
 		gimbal_manager_info.gimbal_device_id = control_data.device_compid;
 
@@ -775,9 +785,9 @@ InputMavlinkGimbalV2::_process_command(ControlData &control_data, const vehicle_
 		// Stabilization params are ignored. Use MNT_DO_STAB param instead.
 
 		const int params[] = {
-			(int)((float) vehicle_command.param5 + 0.5f),
-			(int)((float) vehicle_command.param6 + 0.5f),
-			(int)(vehicle_command.param7 + 0.5f)
+			static_cast<int>(lroundf(vehicle_command.param5)),
+			static_cast<int>(lroundf(vehicle_command.param6)),
+			static_cast<int>(lroundf(vehicle_command.param7))
 		};
 
 		for (int i = 0; i < 3; ++i) {
@@ -900,8 +910,10 @@ InputMavlinkGimbalV2::_process_command(ControlData &control_data, const vehicle_
 		if (vehicle_command.source_system == control_data.sysid_primary_control &&
 		    vehicle_command.source_component == control_data.compid_primary_control) {
 
-			const matrix::Eulerf euler(0.0f, math::radians(vehicle_command.param1),
-						   math::radians(vehicle_command.param2));
+			const matrix::Eulerf euler(
+				0.0f,
+				PX4_ISFINITE(vehicle_command.param1) ? math::radians(vehicle_command.param1) : 0.0f,
+				PX4_ISFINITE(vehicle_command.param2) ? math::radians(vehicle_command.param2) : 0.0f);
 			const matrix::Quatf q(euler);
 			const matrix::Vector3f angular_velocity(NAN, math::radians(vehicle_command.param3),
 								math::radians(vehicle_command.param4));
@@ -936,21 +948,19 @@ InputMavlinkGimbalV2::UpdateResult InputMavlinkGimbalV2::_process_set_manual_con
 	if (set_manual_control.origin_sysid == control_data.sysid_primary_control &&
 	    set_manual_control.origin_compid == control_data.compid_primary_control) {
 
-		const matrix::Quatf q =
-			(PX4_ISFINITE(set_manual_control.pitch) && PX4_ISFINITE(set_manual_control.yaw))
-			?
-			matrix::Quatf(
-				matrix::Eulerf(0.0f, set_manual_control.pitch, set_manual_control.yaw))
-			:
-			matrix::Quatf(NAN, NAN, NAN, NAN);
+		Quatf q(NAN, NAN, NAN, NAN);
 
-		const matrix::Vector3f angular_velocity =
-			(PX4_ISFINITE(set_manual_control.pitch_rate) &&
-			 PX4_ISFINITE(set_manual_control.yaw_rate)) ?
-			matrix::Vector3f(0.0f,
-					 math::radians(_parameters.mnt_rate_pitch) * set_manual_control.pitch_rate,
-					 math::radians(_parameters.mnt_rate_yaw) * set_manual_control.yaw_rate) :
-			matrix::Vector3f(NAN, NAN, NAN);
+		if (PX4_ISFINITE(set_manual_control.pitch) && PX4_ISFINITE(set_manual_control.yaw)) {
+			q = Quatf(matrix::Eulerf(0.0f, set_manual_control.pitch, set_manual_control.yaw));
+		}
+
+		Vector3f angular_velocity(NAN, NAN, NAN);
+
+		if (PX4_ISFINITE(set_manual_control.pitch_rate) && PX4_ISFINITE(set_manual_control.yaw_rate)) {
+			angular_velocity = Vector3f(0.0f,
+						    set_manual_control.pitch_rate * math::radians(_parameters.mnt_rate_pitch),
+						    set_manual_control.yaw_rate * math::radians(_parameters.mnt_rate_yaw));
+		}
 
 		_set_control_data_from_set_attitude(control_data, set_manual_control.flags, q,
 						    angular_velocity, set_manual_control.timestamp);

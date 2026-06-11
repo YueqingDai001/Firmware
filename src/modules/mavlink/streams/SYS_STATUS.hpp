@@ -144,7 +144,6 @@ private:
 			fillOutComponent(health_report, MAV_SYS_STATUS_SENSOR_BATTERY, health_component_t::battery, msg);
 			fillOutComponent(health_report, MAV_SYS_STATUS_SENSOR_MOTOR_OUTPUTS, health_component_t::motors_escs, msg);
 			fillOutComponent(health_report, MAV_SYS_STATUS_RECOVERY_SYSTEM, health_component_t::parachute, msg);
-			fillOutComponent(health_report, MAV_SYS_STATUS_OBSTACLE_AVOIDANCE, health_component_t::avoidance, msg);
 			fillOutComponent(health_report, MAV_SYS_STATUS_SENSOR_3D_ACCEL, health_component_t::accel, msg);
 			fillOutComponent(health_report, MAV_SYS_STATUS_SENSOR_3D_GYRO, health_component_t::gyro, msg);
 			fillOutComponent(health_report, MAV_SYS_STATUS_SENSOR_3D_MAG, health_component_t::magnetometer, msg);
@@ -171,8 +170,8 @@ private:
 
 			if (lowest_battery.connected) {
 				msg.voltage_battery = lowest_battery.voltage_v * 1000.0f;
-				msg.current_battery = lowest_battery.current_a * 100.0f;
-				msg.battery_remaining = ceilf(lowest_battery.remaining * 100.0f);
+				msg.current_battery = (fabsf(lowest_battery.current_a + 1.f) > FLT_EPSILON) ? lowest_battery.current_a * 100.0f : -1;
+				msg.battery_remaining = (fabsf(lowest_battery.remaining + 1.f) > FLT_EPSILON) ? ceilf(lowest_battery.remaining * 100.0f) : -1;
 
 			} else {
 				msg.voltage_battery = UINT16_MAX;

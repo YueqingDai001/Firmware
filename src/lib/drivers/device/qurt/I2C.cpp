@@ -48,6 +48,10 @@
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/i2c_spi_buses.h>
 
+extern "C" {
+	__EXPORT void fc_uninitialize_i2c_bus(int fd);
+}
+
 namespace device
 {
 
@@ -55,7 +59,16 @@ I2C::_config_i2c_bus_func_t  I2C::_config_i2c_bus  = NULL;
 I2C::_set_i2c_address_func_t I2C::_set_i2c_address = NULL;
 I2C::_i2c_transfer_func_t    I2C::_i2c_transfer    = NULL;
 
-pthread_mutex_t I2C::_mutex = PTHREAD_MUTEX_INITIALIZER;
+// There is a mutex per I2C bus. A mutex isn't required with normal
+// use since per bus I2C accesses are made via work item tied to a per bus thread.
+// But it is here anyways in case someone decides to use the bus in some different
+// custom code that has a separate thread.
+struct I2C::_bus_mutex_t I2C::_bus_mutex[I2C::MAX_I2C_BUS] = {
+	{1, PTHREAD_MUTEX_INITIALIZER},
+	{2, PTHREAD_MUTEX_INITIALIZER},
+	{4, PTHREAD_MUTEX_INITIALIZER},
+	{5, PTHREAD_MUTEX_INITIALIZER}
+};
 
 I2C::I2C(uint8_t device_type, const char *name, const int bus, const uint16_t address, const uint32_t frequency) :
 	CDev(name, nullptr),
@@ -86,17 +99,38 @@ I2C::init()
 {
 	int ret = PX4_ERROR;
 
+	if (_i2c_fd != -1) {
+		return PX4_OK;
+	}
+
 	if (_config_i2c_bus == NULL) {
 		PX4_ERR("NULL i2c init function");
 		goto out;
 	}
 
-	pthread_mutex_lock(&_mutex);
+	if (_mutex == nullptr) {
+		for (int i = 0; i < MAX_I2C_BUS; i++) {
+			if (get_device_bus() == _bus_mutex[i]._bus) {
+				_mutex = &_bus_mutex[i]._mutex;
+				break;
+			}
+		}
+
+		if (_mutex == nullptr) {
+			PX4_ERR("NULL i2c bus mutex");
+			goto out;
+
+		} else {
+			PX4_INFO("Set up I2C bus mutex for bus %d", get_device_bus());
+		}
+	}
+
+	pthread_mutex_lock(_mutex);
 	// Open the actual I2C device
 	_i2c_fd = _config_i2c_bus(get_device_bus(), get_device_address(), _frequency);
-	pthread_mutex_unlock(&_mutex);
+	pthread_mutex_unlock(_mutex);
 
-	if (_i2c_fd == PX4_ERROR) {
+	if (_i2c_fd == -1) {
 		PX4_ERR("i2c init failed");
 		goto out;
 	}
@@ -106,6 +140,8 @@ I2C::init()
 
 	if (ret != OK) {
 		PX4_ERR("i2c probe failed");
+		fc_uninitialize_i2c_bus(_i2c_fd);
+		_i2c_fd = -1;
 		goto out;
 	}
 
@@ -126,14 +162,16 @@ out:
 }
 
 void
-I2C::set_device_address(int address)
+I2C::set_device_address(int address, bool log)
 {
 	if ((_i2c_fd != PX4_ERROR) && (_set_i2c_address != NULL)) {
-		PX4_INFO("Set i2c address 0x%x, fd %d", address, _i2c_fd);
+		if (log) {
+			PX4_INFO("Set i2c address 0x%x, fd %d", address, _i2c_fd);
+		}
 
-		pthread_mutex_lock(&_mutex);
+		pthread_mutex_lock(_mutex);
 		_set_i2c_address(_i2c_fd, address);
-		pthread_mutex_unlock(&_mutex);
+		pthread_mutex_unlock(_mutex);
 
 		Device::set_device_address(address);
 	}
@@ -150,9 +188,9 @@ I2C::transfer(const uint8_t *send, const unsigned send_len, uint8_t *recv, const
 		do {
 			// PX4_INFO("transfer out %p/%u  in %p/%u", send, send_len, recv, recv_len);
 
-			pthread_mutex_lock(&_mutex);
+			pthread_mutex_lock(_mutex);
 			ret = _i2c_transfer(_i2c_fd, send, send_len, recv, recv_len);
-			pthread_mutex_unlock(&_mutex);
+			pthread_mutex_unlock(_mutex);
 
 			if (ret != PX4_ERROR) { break; }
 

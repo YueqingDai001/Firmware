@@ -55,8 +55,10 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/failure_detector_status.h>
 #include <uORB/topics/failsafe_flags.h>
 #include <uORB/topics/health_report.h>
+#include <uORB/topics/vehicle_air_data.h>
 
 #include <px4_platform_common/events.h>
 
@@ -134,6 +136,7 @@ private:
 			updated |= write_heading_if_updated(&msg);
 			updated |= write_mission_result_if_updated(&msg);
 			updated |= write_failsafe_flags(&msg);
+			updated |= write_failure_detector_status(&msg);
 
 			// these topics are already updated in update_data() and thus we just copy them here
 			write_airspeed(&msg);
@@ -284,7 +287,7 @@ private:
 				updated = true;
 				_batteries[i].connected = battery.connected;
 
-				if (battery.warning > battery_status_s::BATTERY_WARNING_LOW) {
+				if (battery.warning > battery_status_s::WARNING_LOW) {
 					msg->failure_flags |= HL_FAILURE_FLAG_BATTERY;
 				}
 			}
@@ -453,10 +456,6 @@ private:
 				}
 			}
 
-			if (status.failure_detector_status & vehicle_status_s::FAILURE_MOTOR) {
-				msg->failure_flags |= HL_FAILURE_FLAG_ENGINE;
-			}
-
 			// flight mode
 			union px4_custom_mode custom_mode {get_px4_custom_mode(status.nav_state)};
 			msg->custom_mode = custom_mode.custom_mode_hl;
@@ -484,6 +483,21 @@ private:
 				msg->failure_flags |= HL_FAILURE_FLAG_RC_RECEIVER;
 			}
 
+
+			return true;
+		}
+
+		return false;
+	}
+
+	bool write_failure_detector_status(mavlink_high_latency2_t *msg)
+	{
+		failure_detector_status_s fd_status;
+
+		if (_failure_detector_status_sub.update(&fd_status)) {
+			if (fd_status.fd_motor) {
+				msg->failure_flags |= HL_FAILURE_FLAG_ENGINE;
+			}
 
 			return true;
 		}
@@ -521,6 +535,7 @@ private:
 		update_gps();
 		update_vehicle_status();
 		update_wind();
+		update_vehicle_air_data();
 	}
 
 	void update_airspeed()
@@ -529,7 +544,6 @@ private:
 
 		if (_airspeed_sub.update(&airspeed)) {
 			_airspeed.add_value(airspeed.indicated_airspeed_m_s, _update_rate_filtered);
-			_temperature.add_value(airspeed.air_temperature_celsius, _update_rate_filtered);
 		}
 	}
 
@@ -610,6 +624,15 @@ private:
 		}
 	}
 
+	void update_vehicle_air_data()
+	{
+		vehicle_air_data_s air_data;
+
+		if (_vehicle_air_data_sub.update(&air_data)) {
+			_temperature.add_value(air_data.ambient_temperature, _update_rate_filtered);
+		}
+	}
+
 	void set_default_values(mavlink_high_latency2_t &msg) const
 	{
 		msg.airspeed = 0;
@@ -655,10 +678,12 @@ private:
 	uORB::Subscription _gps_sub{ORB_ID(vehicle_gps_position)};
 	uORB::Subscription _mission_result_sub{ORB_ID(mission_result)};
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
+	uORB::Subscription _failure_detector_status_sub{ORB_ID(failure_detector_status)};
 	uORB::Subscription _failsafe_flags_sub{ORB_ID(failsafe_flags)};
 	uORB::Subscription _tecs_status_sub{ORB_ID(tecs_status)};
 	uORB::Subscription _wind_sub{ORB_ID(wind)};
 	uORB::Subscription _health_report_sub{ORB_ID(health_report)};
+	uORB::Subscription _vehicle_air_data_sub{ORB_ID(vehicle_air_data)};
 
 	SimpleAnalyzer _airspeed;
 	SimpleAnalyzer _airspeed_sp;
@@ -674,7 +699,7 @@ private:
 	hrt_abstime _last_update_time{0};
 	float _update_rate_filtered{0};
 
-	PerBatteryData _batteries[battery_status_s::MAX_INSTANCES] {0, 1, 2, 3};
+	PerBatteryData _batteries[battery_status_s::MAX_INSTANCES] {0, 1, 2};
 };
 
 #endif // HIGH_LATENCY2_HPP

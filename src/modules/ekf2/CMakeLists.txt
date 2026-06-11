@@ -38,6 +38,7 @@ execute_process(
     COMMAND ${PYTHON_EXECUTABLE} -m symforce.symbolic
     RESULT_VARIABLE PYTHON_SYMFORCE_EXIT_CODE
     OUTPUT_QUIET
+    ERROR_QUIET
 )
 
 # for now only provide symforce target helper if derivation.py generation isn't default
@@ -131,7 +132,6 @@ list(APPEND EKF_SRCS
 	EKF/aid_sources/fake_pos_control.cpp
 	EKF/aid_sources/ZeroGyroUpdate.cpp
 	EKF/aid_sources/ZeroVelocityUpdate.cpp
-	EKF/aid_sources/zero_innovation_heading_update.cpp
 )
 
 if(CONFIG_EKF2_AIRSPEED)
@@ -140,7 +140,10 @@ if(CONFIG_EKF2_AIRSPEED)
 endif()
 
 if(CONFIG_EKF2_AUX_GLOBAL_POSITION)
-	list(APPEND EKF_SRCS EKF/aid_sources/aux_global_position/aux_global_position.cpp)
+	list(APPEND EKF_SRCS
+		EKF/aid_sources/aux_global_position/aux_global_position.cpp
+		EKF/aid_sources/aux_global_position/aux_global_position_control.cpp
+	)
 	list(APPEND EKF_MODULE_PARAMS params_aux_global_position.yaml)
 endif()
 
@@ -172,8 +175,8 @@ endif()
 
 if(CONFIG_EKF2_GNSS)
 	list(APPEND EKF_SRCS
+		EKF/aid_sources/gnss/gnss_checks.cpp
 		EKF/aid_sources/gnss/gnss_height_control.cpp
-		EKF/aid_sources/gnss/gps_checks.cpp
 		EKF/aid_sources/gnss/gps_control.cpp
 	)
 
@@ -215,6 +218,13 @@ if(CONFIG_EKF2_RANGE_FINDER)
 		EKF/aid_sources/range_finder/sensor_range_finder.cpp
 	)
 	list(APPEND EKF_MODULE_PARAMS params_range_finder.yaml)
+endif()
+
+if(CONFIG_EKF2_RANGING_BEACON)
+	list(APPEND EKF_SRCS
+		EKF/aid_sources/ranging_beacon/ranging_beacon_control.cpp
+	)
+	list(APPEND EKF_MODULE_PARAMS params_ranging_beacon.yaml)
 endif()
 
 if(CONFIG_EKF2_SIDESLIP)
